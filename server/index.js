@@ -1,289 +1,71 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import Stripe from 'stripe';
 import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
-import nodemailer from 'nodemailer';
+import { getSupabaseAdmin } from '../api/_supabaseAdmin.js';
 
 dotenv.config();
 
 const app = express();
+app.set('trust proxy', true);
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = 'file:./dev.db';
+}
 const prisma = new PrismaClient();
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_mock', {
-  apiVersion: '2023-10-16',
-});
 
-const getDropStartMs = () => {
-  if (!process.env.DROP_START_AT) return null;
-  const ms = new Date(process.env.DROP_START_AT).getTime();
-  return Number.isFinite(ms) ? ms : null;
-};
+const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'qwerty';
+const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const BOOKING_IP_TTL_MS = Math.max(
+  1,
+  Number(process.env.BOOKING_IP_TTL_HOURS || 24) * 60 * 60 * 1000
+);
 
-const isDropLive = () => {
-  const ms = getDropStartMs();
-  if (!ms) return true;
-  return Date.now() >= ms;
-};
+function normalizeIp(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.startsWith('::ffff:')) return raw.slice('::ffff:'.length);
+  return raw;
+}
 
-const toBase64Url = (str) =>
-  Buffer.from(str, 'utf8').toString('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-
-const fromBase64Url = (str) => {
-  const pad = str.length % 4 === 0 ? '' : '='.repeat(4 - (str.length % 4));
-  const base64 = (str + pad).replace(/-/g, '+').replace(/_/g, '/');
-  return Buffer.from(base64, 'base64').toString('utf8');
-};
-
-const signDropToken = (payloadB64) => {
-  const secret = process.env.DROP_TOKEN_SECRET || process.env.DROP_PASSWORD || 'dev_drop_secret';
-  return crypto.createHmac('sha256', secret).update(payloadB64).digest('base64').replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_');
-};
-
-const createDropToken = () => {
-  const startMs = getDropStartMs();
-  const exp = startMs ? startMs + 24 * 60 * 60 * 1000 : Date.now() + 24 * 60 * 60 * 1000;
-  const payloadB64 = toBase64Url(JSON.stringify({ exp }));
-  const sig = signDropToken(payloadB64);
-  return `${payloadB64}.${sig}`;
-};
-
-const isValidDropToken = (token) => {
-  if (!token || typeof token !== 'string') return false;
-  const parts = token.split('.');
-  if (parts.length !== 2) return false;
-  const [payloadB64, sig] = parts;
-  const expected = signDropToken(payloadB64);
-  try {
-    const a = Buffer.from(sig);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length) return false;
-    if (!crypto.timingSafeEqual(a, b)) return false;
-  } catch (e) {
-    return false;
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.trim()) {
+    const first = xff.split(',')[0]?.trim();
+    return normalizeIp(first);
   }
+  return normalizeIp(req.ip);
+}
 
-  try {
-    const payload = JSON.parse(fromBase64Url(payloadB64));
-    if (!payload?.exp) return false;
-    if (Date.now() > payload.exp) return false;
-    return true;
-  } catch (e) {
-    return false;
-  }
+const hashPassword = (password) => {
+  const salt = crypto.randomBytes(16);
+  const key = crypto.scryptSync(String(password), salt, 32);
+  return `${salt.toString('hex')}:${key.toString('hex')}`;
 };
 
-const getDropTokenFromReq = (req) => {
-  const header = req.headers['x-drop-token'];
-  if (typeof header === 'string' && header.trim()) return header.trim();
-  const auth = req.headers['authorization'];
-  if (typeof auth === 'string' && auth.startsWith('Bearer ')) return auth.slice('Bearer '.length).trim();
-  return null;
+const verifyPassword = (password, stored) => {
+  if (!stored || typeof stored !== 'string') return false;
+  const [saltHex, keyHex] = stored.split(':');
+  if (!saltHex || !keyHex) return false;
+  const salt = Buffer.from(saltHex, 'hex');
+  const expected = Buffer.from(keyHex, 'hex');
+  const actual = crypto.scryptSync(String(password), salt, expected.length);
+  if (expected.length !== actual.length) return false;
+  return crypto.timingSafeEqual(expected, actual);
 };
 
-// --- INPOST API INTEGRATION ---
-const createInPostShipment = async (order) => {
-  if (process.env.INPOST_API_TOKEN === 'mock_inpost_token' || !process.env.INPOST_API_TOKEN) {
-    console.log('Using mock InPost API - returning fake tracking number');
-    return {
-      shipmentId: `mock_shipment_${crypto.randomUUID().substring(0, 8)}`,
-      trackingNumber: `6${Math.floor(Math.random() * 10000000000000000000000).toString().padStart(23, '0')}`,
-      status: 'created'
-    };
-  }
-
-  // Calculate size based on items
-  // Simple logic:
-  // 1-2 items = size A (small)
-  // 3-4 items = size B (medium)
-  // 5+ items = size C (large)
-  const totalItems = order.items.reduce((acc, item) => acc + item.quantity, 0);
-  let size = 'A';
-  if (totalItems > 2 && totalItems <= 4) size = 'B';
-  if (totalItems > 4) size = 'C';
-
-  const baseUrl = process.env.INPOST_ENV === 'production' 
-    ? 'https://api.inpost-group.com' 
-    : 'https://sandbox-api.inpost-group.com';
-    
-  const isLocker = order.deliveryMethod === 'inpost_locker';
-  const serviceId = isLocker ? 'inpost_locker_standard' : 'inpost_courier_standard';
-
-  const payload = {
-    receiver: {
-      first_name: order.firstName,
-      last_name: order.lastName,
-      email: order.email,
-      phone: '111222333', // In real app, we should collect phone number
-      address: isLocker ? undefined : {
-        street: order.street,
-        building_number: order.houseNumber,
-        city: order.city,
-        post_code: order.postalCode,
-        country_code: 'PL'
-      }
+const ensureAdminConfig = async () => {
+  const existing = await prisma.adminConfig.findUnique({ where: { id: 'default' } });
+  if (existing) return;
+  await prisma.adminConfig.create({
+    data: {
+      id: 'default',
+      passwordHash: hashPassword(DEFAULT_ADMIN_PASSWORD),
     },
-    parcels: [
-      {
-        dimensions: {
-          length: size === 'A' ? 80 : size === 'B' ? 190 : 410,
-          width: 380,
-          height: 640,
-          unit: 'mm'
-        },
-        weight: {
-          amount: size === 'A' ? 1 : size === 'B' ? 3 : 5,
-          unit: 'kg'
-        }
-      }
-    ],
-    service: serviceId,
-    custom_attributes: isLocker ? {
-      target_point: order.inpostPointId
-    } : undefined,
-    reference: order.orderNumber
-  };
-
-  try {
-    const res = await fetch(`${baseUrl}/shipping/v2/organizations/${process.env.INPOST_ORG_ID}/shipments`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.INPOST_API_TOKEN}`
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`InPost API error: ${res.status} ${errText}`);
-    }
-
-    const data = await res.json();
-    return {
-      shipmentId: data.id,
-      trackingNumber: data.tracking_number,
-      status: data.status
-    };
-  } catch (error) {
-    console.error('Failed to create InPost shipment', error);
-    throw error;
-  }
+  });
 };
 
-// Configure Nodemailer
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.ethereal.email',
-  port: process.env.SMTP_PORT || 587,
-  auth: {
-    user: process.env.SMTP_USER || 'mockUser',
-    pass: process.env.SMTP_PASS || 'mockPass',
-  },
-});
-
-const sendOrderConfirmationEmail = async (order) => {
-  const isLocker = order.deliveryMethod === 'inpost_locker';
-  const deliveryInfo = isLocker 
-    ? `Paczkomat InPost: <strong>${order.inpostPointId}</strong><br/>${order.inpostPointAddress}, ${order.inpostPointPostalCode} ${order.inpostPointCity}`
-    : `Kurier InPost<br/>${order.street} ${order.houseNumber}, ${order.postalCode} ${order.city}`;
-
-  const trackingInfo = order.trackingNumber 
-    ? `<p>Numer przesyłki: <strong>${order.trackingNumber}</strong></p><p><a href="https://inpost.pl/sledzenie-przesylek?number=${order.trackingNumber}" target="_blank">Śledź przesyłkę na stronie InPost</a></p>`
-    : '';
-
-  const mailOptions = {
-    from: '"TatraGrail" <no-reply@tatragrail.com>',
-    to: order.email,
-    subject: `Potwierdzenie zamówienia ${order.orderNumber}`,
-    html: `
-      <h1>Dziękujemy za zakupy w TatraGrail!</h1>
-      <p>Twoje zamówienie <strong>${order.orderNumber}</strong> zostało opłacone i jest w trakcie realizacji.</p>
-      <p>Kwota zamówienia: <strong>${order.total.toFixed(2)} PLN</strong></p>
-      
-      <h3>Dane dostawy:</h3>
-      <p>${deliveryInfo}</p>
-      ${trackingInfo}
-      
-      <br/><br/>
-      <a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/tracking/${order.trackingToken}" style="display:inline-block;padding:10px 20px;background:#000;color:#fff;text-decoration:none;">Szczegóły zamówienia</a>
-    `,
-  };
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Confirmation email sent to ${order.email}`);
-  } catch (error) {
-    console.error('Failed to send confirmation email', error);
-  }
-};
-
-// For webhook, we need raw body
-app.post('/api/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  const sig = req.headers['stripe-signature'];
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-  let event;
-
-  try {
-    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
-  } catch (err) {
-    console.error(`Webhook Error: ${err.message}`);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  // Handle the event
-  if (event.type === 'payment_intent.succeeded') {
-    const paymentIntent = event.data.object;
-    const orderId = paymentIntent.metadata.orderId;
-    
-    // Update order status
-    try {
-      const order = await prisma.order.update({
-        where: { id: orderId },
-        data: { 
-          paymentStatus: 'paid',
-          paymentProvider: 'stripe'
-        }
-      });
-      console.log(`Order ${order.orderNumber} marked as paid via PaymentIntent.`);
-      
-      // Create shipment
-      try {
-        const shipmentData = await createInPostShipment(order);
-        
-        await prisma.order.update({
-          where: { id: order.id },
-          data: {
-            shipmentId: shipmentData.shipmentId,
-            trackingNumber: shipmentData.trackingNumber,
-            shipmentStatus: shipmentData.status
-          }
-        });
-        console.log(`Shipment created for order ${order.orderNumber}. Tracking: ${shipmentData.trackingNumber}`);
-        
-        order.trackingNumber = shipmentData.trackingNumber;
-      } catch (shipmentError) {
-        console.error(`Failed to create shipment for order ${order.orderNumber}`, shipmentError);
-      }
-
-      await sendOrderConfirmationEmail(order);
-    } catch (error) {
-      console.error('Error updating order on webhook', error);
-    }
-  } else if (event.type === 'payment_intent.payment_failed') {
-    const paymentIntent = event.data.object;
-    const orderId = paymentIntent.metadata.orderId;
-    try {
-      if (orderId) {
-        await prisma.order.update({
-          where: { id: orderId },
-          data: { paymentStatus: 'failed' }
-        });
-      }
-    } catch (error) {}
-  }
-
-  res.send();
-});
+await ensureAdminConfig();
 
 // Normal JSON parsing for other routes
 app.use(express.json());
@@ -291,246 +73,333 @@ app.use(cors());
 
 // --- ROUTES ---
 
-app.get('/api/drop/status', (req, res) => {
-  res.json({ live: isDropLive(), dropStartAt: process.env.DROP_START_AT || null });
-});
+const requireAdmin = (req, res, next) => {
+  const token = req.headers['x-admin-token'];
+  if (typeof token !== 'string' || !token.trim()) return res.status(401).json({ error: 'Unauthorized' });
+  prisma.adminSession
+    .findUnique({ where: { token: token.trim() } })
+    .then((session) => {
+      if (!session) return res.status(401).json({ error: 'Unauthorized' });
+      if (session.expiresAt.getTime() <= Date.now()) {
+        return prisma.adminSession
+          .delete({ where: { token: session.token } })
+          .then(() => res.status(401).json({ error: 'Unauthorized' }))
+          .catch(() => res.status(401).json({ error: 'Unauthorized' }));
+      }
+      next();
+    })
+    .catch(() => res.status(401).json({ error: 'Unauthorized' }));
+};
 
-app.post('/api/drop/unlock', (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   const { password } = req.body || {};
-  if (!process.env.DROP_PASSWORD) return res.status(400).json({ error: 'DROP_PASSWORD not configured' });
-  if (!password || password !== process.env.DROP_PASSWORD) return res.status(401).json({ error: 'Invalid password' });
-  const token = createDropToken();
-  res.json({ ok: true, token });
-});
-
-// 1. Validate Discount Code
-app.post('/api/discount/validate', async (req, res) => {
-  const { code, cartTotal } = req.body;
-  if (!code) return res.status(400).json({ error: 'Code is required' });
-
   try {
-    const promo = await prisma.promoCode.findUnique({ where: { code } });
-    if (!promo) return res.status(404).json({ error: 'Code not found' });
-    if (!promo.active) return res.status(400).json({ error: 'Code is inactive' });
-    if (promo.expiration && promo.expiration < new Date()) return res.status(400).json({ error: 'Code expired' });
-    if (promo.usageLimit && promo.usageCount >= promo.usageLimit) return res.status(400).json({ error: 'Usage limit exceeded' });
-    if (promo.minimumCartValue && cartTotal < promo.minimumCartValue) return res.status(400).json({ error: `Minimum cart value is ${promo.minimumCartValue}` });
-
-    res.json({ success: true, promo });
+    const config = await prisma.adminConfig.findUnique({ where: { id: 'default' } });
+    const ok = verifyPassword(password, config?.passwordHash);
+    if (!ok) return res.status(401).json({ error: 'Unauthorized' });
+    const token = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + ADMIN_SESSION_TTL_MS);
+    await prisma.adminSession.create({ data: { token, expiresAt } });
+    res.json({ token });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// 2. Create Payment Intent (Stripe + BLIK)
-app.post('/api/create-payment-intent', async (req, res) => {
-  const { cart, customer, promoCode, delivery } = req.body;
-
-  if (!cart || cart.length === 0) return res.status(400).json({ error: 'Cart is empty' });
-
-  const dropToken = getDropTokenFromReq(req);
-  if (!isDropLive() && !isValidDropToken(dropToken)) {
-    return res.status(403).json({ error: 'Drop is locked' });
-  }
-  
-  if (delivery?.method === 'inpost_locker' && !delivery?.point?.id) {
-    return res.status(400).json({ error: 'Należy wybrać paczkomat InPost' });
-  }
-
+app.post('/api/admin/change-password', requireAdmin, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!newPassword || String(newPassword).length < 4) return res.status(400).json({ error: 'Invalid new password' });
   try {
-    let subtotal = 0;
-    cart.forEach(item => {
-      subtotal += item.unitPrice * item.quantity;
+    const config = await prisma.adminConfig.findUnique({ where: { id: 'default' } });
+    const ok = verifyPassword(currentPassword, config?.passwordHash);
+    if (!ok) return res.status(401).json({ error: 'Unauthorized' });
+    await prisma.adminConfig.update({
+      where: { id: 'default' },
+      data: { passwordHash: hashPassword(newPassword) },
     });
-
-    let discount = 0;
-    let appliedCode = null;
-    let partnerId = null;
-
-    if (promoCode) {
-      const promo = await prisma.promoCode.findUnique({ where: { code: promoCode } });
-      if (promo && promo.active && (!promo.expiration || promo.expiration > new Date())) {
-        if (promo.type === 'percentage') {
-          discount = subtotal * (promo.value / 100);
-        } else {
-          discount = promo.value;
-        }
-        appliedCode = promo.code;
-        partnerId = promo.partnerId;
-        
-        await prisma.promoCode.update({
-          where: { code: promo.code },
-          data: { usageCount: { increment: 1 } }
-        });
-      }
-    }
-
-    const shipping = 15.00;
-    const total = subtotal - discount + shipping;
-
-    const orderNumber = `TG-${new Date().getFullYear()}-${crypto.randomInt(100000, 999999)}`;
-
-    const order = await prisma.order.create({
-      data: {
-        orderNumber,
-        email: customer.email,
-        firstName: customer.firstName,
-        lastName: customer.lastName,
-        country: customer.country,
-        city: customer.city,
-        postalCode: customer.postalCode,
-        street: customer.street,
-        houseNumber: customer.houseNumber,
-        companyName: customer.companyName,
-        nip: customer.nip,
-        subtotal,
-        discount,
-        shipping,
-        total,
-        appliedCode,
-        partnerId,
-        deliveryMethod: delivery?.method || 'inpost_courier',
-        inpostPointId: delivery?.point?.id || null,
-        inpostPointName: delivery?.point?.name || null,
-        inpostPointAddress: delivery?.point?.address || null,
-        inpostPointCity: delivery?.point?.city || null,
-        inpostPointPostalCode: delivery?.point?.postalCode || null,
-        items: {
-          create: cart.map(item => ({
-            productId: item.productId,
-            variantId: item.variantId,
-            size: item.size,
-            quantity: item.quantity,
-            unitPrice: item.unitPrice,
-            productName: item.productName,
-            image: item.image
-          }))
-        }
-      }
-    });
-
-    if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY === 'sk_test_mock') {
-      // Mock logic for local testing without real Stripe keys
-      return res.json({ 
-        clientSecret: 'mock_secret_client', 
-        orderId: order.id, 
-        trackingToken: order.trackingToken,
-        mockUrl: `http://localhost:${process.env.PORT || 3000}/api/mock-stripe/${order.id}`
-      });
-    }
-
-    // Create Stripe PaymentIntent with BLIK and card
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: Math.round(total * 100),
-      currency: 'pln',
-      payment_method_types: ['card', 'blik'],
-      metadata: { orderId: order.id }
-    });
-
-    await prisma.order.update({
-      where: { id: order.id },
-      data: { stripePaymentIntentId: paymentIntent.id }
-    });
-
-    res.json({
-      clientSecret: paymentIntent.client_secret,
-      orderId: order.id,
-      trackingToken: order.trackingToken
-    });
-
-  } catch (error) {
-    console.error('Create PaymentIntent error:', error);
-    res.status(500).json({ error: 'Failed: ' + error.message });
-  }
-});
-
-// 3. Get Order details for tracking
-app.get('/api/order/:trackingToken', async (req, res) => {
-  const { trackingToken } = req.params;
-  try {
-    const order = await prisma.order.findUnique({
-      where: { trackingToken },
-      include: { items: true }
-    });
-    if (!order) return res.status(404).json({ error: 'Order not found' });
-    res.json(order);
+    await prisma.adminSession.deleteMany({});
+    const token = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + ADMIN_SESSION_TTL_MS);
+    await prisma.adminSession.create({ data: { token, expiresAt } });
+    res.json({ token });
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
 });
 
-// 4. Mock Stripe Routes
-app.get('/api/mock-stripe/:orderId', async (req, res) => {
-  const { orderId } = req.params;
-  const order = await prisma.order.findUnique({ where: { id: orderId } });
-  
-  if (!order) return res.status(404).send('Order not found');
-
-  res.send(`
-    <html>
-      <head>
-        <title>Mock Stripe Checkout - TatraGrail</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0a0a0a; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; color: white; }
-          .card { background: #111; padding: 40px; border: 1px solid #333; text-align: center; max-width: 400px; width: 100%; border-radius: 4px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
-          h2 { text-transform: uppercase; letter-spacing: 2px; margin-top: 0; }
-          .price { font-size: 24px; font-weight: bold; margin: 20px 0; }
-          button { background: white; color: black; border: none; padding: 16px 24px; font-size: 16px; font-weight: bold; text-transform: uppercase; letter-spacing: 2px; cursor: pointer; width: 100%; margin-top: 20px; transition: background 0.2s; }
-          button:hover { background: #e5e5e5; }
-        </style>
-      </head>
-      <body>
-        <div class="card">
-          <h2>Stripe Test Payment</h2>
-          <p style="color: #888; margin-bottom: 30px;">(Środowisko testowe / Mockup)</p>
-          <p>Zamówienie: <strong>${order.orderNumber}</strong></p>
-          <div class="price">${order.total.toFixed(2)} PLN</div>
-          <form method="POST" action="/api/mock-stripe/${orderId}/pay">
-            <button type="submit">ZAPŁAĆ (MOCK)</button>
-          </form>
-        </div>
-      </body>
-    </html>
-  `);
+app.get('/api/catalog/categories', async (req, res) => {
+  try {
+    const categories = await prisma.category.findMany({
+      where: { active: true },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    res.json({ categories });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
-app.post('/api/mock-stripe/:orderId/pay', async (req, res) => {
-  const { orderId } = req.params;
-  const order = await prisma.order.findUnique({ where: { id: orderId } });
-  
-  if (!order) return res.status(404).send('Order not found');
-
-  // Update order status
-  await prisma.order.update({
-    where: { id: orderId },
-    data: { 
-      paymentStatus: 'paid',
-      paymentProvider: 'mock_stripe'
-    }
-  });
-
-  // Create mock shipment
+app.get('/api/catalog/products', async (req, res) => {
+  const { category } = req.query;
   try {
-    const shipmentData = await createInPostShipment(order);
-    await prisma.order.update({
-      where: { id: order.id },
-      data: {
-        shipmentId: shipmentData.shipmentId,
-        trackingNumber: shipmentData.trackingNumber,
-        shipmentStatus: shipmentData.status
-      }
+    const where = {
+      active: true,
+      ...(typeof category === 'string' && category.trim()
+        ? { category: { slug: category.trim() } }
+        : {}),
+    };
+
+    const products = await prisma.product.findMany({
+      where,
+      include: {
+        images: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
+        variants: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
+        category: true,
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
     });
-    order.trackingNumber = shipmentData.trackingNumber;
+    res.json({ products });
   } catch (error) {
-    console.error('Mock shipment error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/catalog/products/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id },
+      include: {
+        images: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
+        variants: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
+        category: true,
+      },
+    });
+    if (!product || !product.active) return res.status(404).json({ error: 'Not found' });
+    res.json({ product });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/bookings/create', async (req, res) => {
+  const ip = getClientIp(req);
+  if (!ip) return res.status(400).json({ error: 'Missing IP' });
+
+  const { customerName, phone, notes, pickupTime, items, currency, subtotal, total } = req.body || {};
+
+  if (!customerName || !String(customerName).trim()) return res.status(400).json({ error: 'customerName is required' });
+  if (!phone || !String(phone).trim()) return res.status(400).json({ error: 'phone is required' });
+  if (!pickupTime || !String(pickupTime).trim()) return res.status(400).json({ error: 'pickupTime is required' });
+  if (!Array.isArray(items) || items.length === 0) return res.status(400).json({ error: 'items is required' });
+
+  const now = Date.now();
+  const existing = await prisma.bookingIpLimit.findUnique({ where: { ip } }).catch(() => null);
+  if (existing && existing.createdAt && existing.createdAt.getTime() > now - BOOKING_IP_TTL_MS) {
+    return res.status(429).json({ error: 'Z jednego IP można złożyć tylko jedną rezerwację na 24h.' });
   }
 
-  // Simulate Webhook Email Notification
-  await sendOrderConfirmationEmail(order);
+  let booking;
+  try {
+    const supabase = getSupabaseAdmin();
+    const payload = {
+      customer_name: String(customerName).trim(),
+      phone: String(phone).trim(),
+      notes: notes ? String(notes).trim() : null,
+      pickup_time: String(pickupTime).trim(),
+      items,
+      currency: currency ? String(currency) : 'PLN',
+      subtotal: Number(subtotal) || 0,
+      total: Number(total) || Number(subtotal) || 0,
+      payment_status: 'pay_at_counter',
+      booking_status: 'confirmed',
+    };
 
-  // Redirect to tracking page
-  res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/tracking/${order.trackingToken}?success=true`);
+    const result = await supabase.from('bookings').insert(payload).select('*').single();
+    if (result.error) return res.status(500).json({ error: result.error.message });
+    booking = result.data;
+  } catch (error) {
+    return res.status(500).json({ error: 'Supabase env not configured' });
+  }
+
+  await prisma.bookingIpLimit
+    .upsert({
+      where: { ip },
+      create: { ip, bookingId: booking.id },
+      update: { bookingId: booking.id, createdAt: new Date() },
+    })
+    .catch(() => {});
+
+  res.json({ booking });
+});
+
+app.get('/api/admin/categories', requireAdmin, async (req, res) => {
+  try {
+    const categories = await prisma.category.findMany({
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+    res.json({ categories });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/admin/products', requireAdmin, async (req, res) => {
+  try {
+    const products = await prisma.product.findMany({
+      include: {
+        images: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
+        variants: { orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
+        category: true,
+      },
+      orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }],
+    });
+    res.json({ products });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/admin/categories', requireAdmin, async (req, res) => {
+  const { slug, name, sortOrder, active } = req.body || {};
+  if (!slug || !name) return res.status(400).json({ error: 'slug and name are required' });
+  try {
+    const category = await prisma.category.create({
+      data: {
+        slug,
+        name,
+        sortOrder: Number.isFinite(Number(sortOrder)) ? Number(sortOrder) : 0,
+        active: typeof active === 'boolean' ? active : true,
+      },
+    });
+    res.json({ category });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { slug, name, sortOrder, active } = req.body || {};
+  if (slug != null && !String(slug).trim()) return res.status(400).json({ error: 'Invalid slug' });
+  if (name != null && !String(name).trim()) return res.status(400).json({ error: 'Invalid name' });
+  try {
+    const category = await prisma.category.update({
+      where: { id },
+      data: {
+        ...(slug != null ? { slug: String(slug).trim() } : {}),
+        ...(name != null ? { name: String(name).trim() } : {}),
+        ...(sortOrder != null && Number.isFinite(Number(sortOrder)) ? { sortOrder: Number(sortOrder) } : {}),
+        ...(typeof active === 'boolean' ? { active } : {}),
+      },
+    });
+    res.json({ category });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await prisma.product.updateMany({
+      where: { categoryId: id },
+      data: { categoryId: null },
+    });
+    await prisma.category.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.post('/api/admin/products', requireAdmin, async (req, res) => {
+  const { slug, name, description, basePrice, currency, active, sortOrder, categoryId, images, variants } = req.body || {};
+  if (!slug || !name) return res.status(400).json({ error: 'slug and name are required' });
+  if (!Number.isFinite(Number(basePrice))) return res.status(400).json({ error: 'basePrice is required' });
+  try {
+    const product = await prisma.product.create({
+      data: {
+        slug,
+        name,
+        description: description || null,
+        basePrice: Number(basePrice),
+        currency: currency || 'PLN',
+        active: typeof active === 'boolean' ? active : true,
+        sortOrder: Number.isFinite(Number(sortOrder)) ? Number(sortOrder) : 0,
+        categoryId: categoryId || null,
+        images: {
+          create: Array.isArray(images)
+            ? images
+                .filter((x) => x?.url)
+                .map((x, idx) => ({
+                  url: String(x.url),
+                  alt: x.alt ? String(x.alt) : null,
+                  sortOrder: Number.isFinite(Number(x.sortOrder)) ? Number(x.sortOrder) : idx,
+                }))
+            : [],
+        },
+        variants: {
+          create: Array.isArray(variants)
+            ? variants
+                .filter((x) => x?.name)
+                .map((x, idx) => ({
+                  name: String(x.name),
+                  sku: x.sku ? String(x.sku) : null,
+                  price: x.price != null && Number.isFinite(Number(x.price)) ? Number(x.price) : null,
+                  active: typeof x.active === 'boolean' ? x.active : true,
+                  sortOrder: Number.isFinite(Number(x.sortOrder)) ? Number(x.sortOrder) : idx,
+                }))
+            : [],
+        },
+      },
+      include: {
+        images: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
+        variants: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
+        category: true,
+      },
+    });
+    res.json({ product });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { name, description, basePrice, currency, active, sortOrder, categoryId } = req.body || {};
+  try {
+    const product = await prisma.product.update({
+      where: { id },
+      data: {
+        ...(name != null ? { name } : {}),
+        ...(description !== undefined ? { description: description || null } : {}),
+        ...(basePrice != null && Number.isFinite(Number(basePrice)) ? { basePrice: Number(basePrice) } : {}),
+        ...(currency != null ? { currency } : {}),
+        ...(typeof active === 'boolean' ? { active } : {}),
+        ...(sortOrder != null && Number.isFinite(Number(sortOrder)) ? { sortOrder: Number(sortOrder) } : {}),
+        ...(categoryId !== undefined ? { categoryId: categoryId || null } : {}),
+      },
+      include: {
+        images: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },
+        variants: { where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] },
+        category: true,
+      },
+    });
+    res.json({ product });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await prisma.product.delete({ where: { id } });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 const PORT = process.env.PORT || 3000;

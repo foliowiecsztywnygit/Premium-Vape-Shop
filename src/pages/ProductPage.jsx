@@ -1,514 +1,242 @@
-import React, { useState } from 'react'
-import { useTranslation } from 'react-i18next'
-import { ArrowLeft, ArrowRight, ChevronDown, ChevronUp, Plus, X } from 'lucide-react'
-import { categoriesData } from '../data/products'
+import React, { useEffect, useMemo, useState } from 'react'
+import { Minus, Plus } from 'lucide-react'
+import { getProduct, getProducts } from '../api/catalog'
 import { useCartStore } from '../store/cartStore'
+import ProductCard from '../components/ProductCard'
 
-// Proste SVG ikony płatności
-const PaymentIcons = () => (
+function formatPrice(value, currency) {
+  const safe = Number(value)
+  if (!Number.isFinite(safe)) return ''
+  const symbol = currency === 'PLN' ? 'zł' : currency
+  return `${safe.toFixed(2).replace('.', ',')} ${symbol}`
+}
 
-  <div className="flex space-x-3 opacity-60">
-    <svg width="32" height="20" viewBox="0 0 32 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="32" height="20" rx="2" fill="#1A1A1A"/>
-      <text x="16" y="14" fill="white" fontSize="10" fontWeight="bold" textAnchor="middle">VISA</text>
-    </svg>
-    <svg width="32" height="20" viewBox="0 0 32 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="32" height="20" rx="2" fill="#1A1A1A"/>
-      <circle cx="12" cy="10" r="5" fill="#EB001B"/>
-      <circle cx="20" cy="10" r="5" fill="#F79E1B" fillOpacity="0.8"/>
-    </svg>
-    <svg width="32" height="20" viewBox="0 0 32 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="32" height="20" rx="2" fill="#1A1A1A"/>
-      <text x="16" y="14" fill="white" fontSize="9" fontStyle="italic" fontWeight="bold" textAnchor="middle">PayPal</text>
-    </svg>
-  </div>
-)
+export default function ProductPage({ id }) {
+  const addItem = useCartStore((state) => state.addItem)
+  const openCart = useCartStore((state) => state.openCart)
 
-export default function ProductPage({ product }) {
-  const { t, i18n } = useTranslation();
-  const addItem = useCartStore(state => state.addItem);
-  const openCart = useCartStore(state => state.openCart);
-  
-  // Stany wariantów i galerii dla głównego przedmiotu
-  const [selectedColor, setSelectedColor] = useState(product.colors[0]);
-  const [selectedSize, setSelectedSize] = useState(null);
-  
-  // Stany bundla (1, 2, lub 3+1 gratis)
-  const [bundleOption, setBundleOption] = useState(1); 
-  const [imgIndex, setImgIndex] = useState(0);
-  
-  // Stan dodatkowych przedmiotów w bundlu
-  const [extraBundleItems, setExtraBundleItems] = useState([]);
-  
-  // Stan modala wyboru produktu
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  
-  // Stany akordeonów
-  const [openAccordion, setOpenAccordion] = useState('details');
+  const [product, setProduct] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [imgIndex, setImgIndex] = useState(0)
+  const [variantId, setVariantId] = useState('')
+  const [quantity, setQuantity] = useState(1)
+  const [similar, setSimilar] = useState([])
 
-  const sizes = product.sizes || ['S', 'M', 'L', 'XL', 'XXL'];
-  const allProducts = categoriesData.flatMap(cat => cat.products);
+  useEffect(() => {
+    let mounted = true
+    setLoading(true)
+    setError('')
+    setProduct(null)
+    setImgIndex(0)
+    setQuantity(1)
+    setVariantId('')
+    setSimilar([])
 
-  const handleBundleOptionChange = (option) => {
-    setBundleOption(option);
-    const limit = option === 1 ? 0 : (option === 2 ? 1 : 3);
-    setExtraBundleItems(prev => prev.slice(0, limit));
-  };
+    getProduct(id)
+      .then((data) => {
+        if (!mounted) return null
+        const p = data?.product || null
+        setProduct(p)
+        setVariantId(p?.variants?.[0]?.id || '')
+        setLoading(false)
+        return p
+      })
+      .then((p) => {
+        if (!mounted || !p?.category?.slug) return
+        return getProducts({ category: p.category.slug })
+          .then((data) => {
+            if (!mounted) return
+            const items = Array.isArray(data?.products) ? data.products : []
+            setSimilar(items.filter((x) => x.id !== p.id).slice(0, 4))
+          })
+          .catch(() => {})
+      })
+      .catch((err) => {
+        if (!mounted) return
+        setError(err?.message || 'Nie udało się załadować produktu')
+        setLoading(false)
+      })
 
-  const openProductSelector = (e) => {
-    e.stopPropagation();
-    setIsModalOpen(true);
-  };
+    return () => {
+      mounted = false
+    }
+  }, [id])
 
-  const handleSelectProduct = (selectedProd) => {
-    setExtraBundleItems(prev => [
-      ...prev,
-      {
-        uid: Math.random().toString(36).substr(2, 9),
-        product: selectedProd,
-        color: selectedProd.colors[0],
-        size: 'S'
-      }
-    ]);
-    setIsModalOpen(false);
-  };
+  const images = useMemo(() => {
+    if (!product?.images) return []
+    return product.images.map((x) => x?.url).filter(Boolean)
+  }, [product])
 
-  const removeExtraItem = (uid, e) => {
-    e.stopPropagation();
-    setExtraBundleItems(prev => prev.filter(item => item.uid !== uid));
-  };
+  const selectedVariant = useMemo(() => {
+    if (!product?.variants?.length) return null
+    return product.variants.find((v) => v.id === variantId) || null
+  }, [product, variantId])
 
-  const updateExtraItem = (uid, field, value) => {
-    setExtraBundleItems(prev => prev.map(item => 
-      item.uid === uid ? { ...item, [field]: value } : item
-    ));
-  };
+  const unitPrice = selectedVariant?.price ?? product?.basePrice
+  const priceLabel = formatPrice(unitPrice, product?.currency)
 
-  // Dynamiczne ceny
-  const basePriceNum = parseFloat(product.price.replace(' PLN', ''));
-  let finalPrice = basePriceNum;
-  if (bundleOption === 2) finalPrice = (basePriceNum * 2) * 0.9;
-  if (bundleOption === 3) finalPrice = (basePriceNum * 3); // 4 szt w cenie 3
-  
-  const formattedPrice = finalPrice.toFixed(2) + ' PLN';
+  const canAddToCart = !!product && (product.variants?.length ? !!variantId : true) && quantity >= 1
 
-  const nextImg = () => setImgIndex((prev) => (prev + 1) % product.images.length);
-  const prevImg = () => setImgIndex((prev) => (prev - 1 + product.images.length) % product.images.length);
-
-  const handleAddToCart = () => {
-    if (!selectedSize) return;
-
-    // Dodaj główny przedmiot
+  const addToCart = () => {
+    if (!canAddToCart) return
+    const image = images[0] || null
     addItem({
       productId: product.id,
-      variantId: `${selectedColor}-${selectedSize}`,
-      size: selectedSize,
-      quantity: 1, // Będziemy to uwzględniać jako pojedyncze itemy albo bundle. Dla uproszczenia dodajemy pojedynczo.
-      unitPrice: basePriceNum,
-      image: product.images[0],
-      productName: product.title[i18n.language]
-     });
- 
-     // Dodaj dodatkowe przedmioty z bundla
-     extraBundleItems.forEach(item => {
-       addItem({
-         productId: item.product.id,
-         variantId: `${item.color}-${item.size}`,
-         size: item.size,
-         quantity: 1,
-         unitPrice: basePriceNum, // W uproszczeniu, w rzeczywistości może zależeć od logiki
-         image: item.product.images[0],
-         productName: item.product.title[i18n.language]
-       });
-     });
+      variantId: variantId || null,
+      variantName: selectedVariant?.name || null,
+      quantity,
+      unitPrice: Number(unitPrice),
+      image,
+      productName: product.name,
+    })
+    openCart()
+  }
 
-    openCart();
-  };
+  if (loading) {
+    return (
+      <div className="min-h-screen pt-32 pb-20 bg-paper text-black">
+        <div className="max-w-[1600px] mx-auto px-fluid-sm">Ładowanie…</div>
+      </div>
+    )
+  }
+
+  if (error || !product) {
+    return (
+      <div className="min-h-screen pt-32 pb-20 bg-paper text-black">
+        <div className="max-w-[1600px] mx-auto px-fluid-sm">{error || 'Nie znaleziono produktu'}</div>
+      </div>
+    )
+  }
 
   return (
-    <div className="min-h-screen bg-white text-black pt-[100px] md:pt-[140px] pb-24">
-      
-      {/* Top Announcement Bar (PDP specific, opcjonalny) */}
-      <div className="w-full bg-black text-white text-center py-2 mb-8 hidden md:block">
-        <p className="text-xs tracking-widest uppercase font-bold">DARMOWA DOSTAWA POWYŻEJ 250 PLN ORAZ DARMOWE ZWROTY DO 30 DNI</p>
-      </div>
+    <div className="min-h-screen pt-28 lg:pt-32 pb-20 bg-paper text-black">
+      <div className="max-w-[1600px] mx-auto px-fluid-sm">
+        <nav className="text-xs tracking-[0.18em] uppercase text-black/50">
+          <a href="/" className="hover:text-black">
+            Strona Główna
+          </a>
+          <span className="mx-2">/</span>
+          <a href="/shop" className="hover:text-black">
+            Sklep
+          </a>
+          {product.category?.name && product.category?.slug && (
+            <>
+              <span className="mx-2">/</span>
+              <a href={`/shop/${product.category.slug}`} className="hover:text-black">
+                {product.category.name}
+              </a>
+            </>
+          )}
+          <span className="mx-2">/</span>
+          <span className="text-black/70">{product.name}</span>
+        </nav>
 
-      <div className="max-w-[1600px] mx-auto px-4 md:px-8 grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-24">
-        
-        {/* Lewa Kolumna: Media */}
-        <div className="relative">
-          <div className="sticky top-[160px] w-full aspect-[3/4] bg-[#f5f5f5] flex items-center justify-center p-8 group">
-            <img 
-              src={product.images[imgIndex]} 
-              alt={product.title} 
-              className="w-full h-full object-contain"
-            />
-            
-            {/* Nawigacja galerii */}
-            {product.images.length > 1 && (
-              <>
-                <button onClick={prevImg} className="absolute left-4 p-2 bg-white/50 hover:bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-                  <ArrowLeft size={20} />
-                </button>
-                <button onClick={nextImg} className="absolute right-4 p-2 bg-white/50 hover:bg-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
-                  <ArrowRight size={20} />
-                </button>
-                <div className="absolute bottom-4 flex space-x-2">
-                  {product.images.map((_, i) => (
-                    <button key={i} onClick={() => setImgIndex(i)} className={`w-2 h-2 rounded-full ${i === imgIndex ? 'bg-black' : 'bg-gray-400'}`}></button>
-                  ))}
-                </div>
-              </>
+        <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-20">
+          <div>
+            <div className="w-full aspect-[4/5] bg-white rounded-2xl border border-black/5 flex items-center justify-center overflow-hidden">
+              {images[imgIndex] ? (
+                <img src={images[imgIndex]} alt={product.name} className="w-full h-full object-contain p-10" />
+              ) : (
+                <div className="h-28 w-28 rounded-2xl bg-gradient-to-br from-accent-deep/20 to-accent-cyan/25" />
+              )}
+            </div>
+            {images.length > 1 && (
+              <div className="mt-4 flex gap-3 overflow-auto">
+                {images.map((url, idx) => (
+                  <button
+                    key={url}
+                    type="button"
+                    onClick={() => setImgIndex(idx)}
+                    className={`h-20 w-20 rounded-xl border ${
+                      idx === imgIndex ? 'border-accent-cyan' : 'border-black/10'
+                    } bg-white flex items-center justify-center`}
+                  >
+                    <img src={url} alt="" className="h-full w-full object-contain p-2" />
+                  </button>
+                ))}
+              </div>
             )}
           </div>
-        </div>
 
-        {/* Prawa Kolumna: Info */}
-        <div className="flex flex-col text-left">
-          
-          {/* Nagłówek & Cena */}
-          <h1 className="text-3xl md:text-5xl font-montserrat font-black uppercase tracking-wide mb-4">
-            {product.title[i18n.language]}
-          </h1>
-          <p className="text-xl md:text-2xl font-bold mb-8">{product.price}</p>
+          <div>
+            <h1 className="text-4xl md:text-5xl font-black tracking-tight">{product.name}</h1>
+            <div className="mt-4 flex items-center gap-4">
+              <p className="text-xl font-semibold">{priceLabel}</p>
+              <span className="text-xs tracking-[0.22em] uppercase text-accent-cyan font-semibold">
+                Premium Vape Shop Ursynów
+              </span>
+            </div>
 
-          {/* Social Proof */}
-          <div className="flex items-center space-x-3 mb-8 bg-gray-50 p-3 border border-gray-200">
-            <div className="flex -space-x-2">
-              <div className="w-6 h-6 rounded-full bg-gray-300 border border-white"></div>
-              <div className="w-6 h-6 rounded-full bg-gray-400 border border-white"></div>
-              <div className="w-6 h-6 rounded-full bg-gray-800 border border-white"></div>
-            </div>
-            <span className="text-xs font-bold tracking-widest text-gray-600">
-              {t('pdp.social_proof', { count: Math.floor(Math.random() * 50) + 12 })}
-            </span>
-          </div>
+            {product.description && <p className="mt-6 text-black/70 leading-relaxed">{product.description}</p>}
 
-          {/* Wariant Główny: Kolor */}
-          <div className="mb-8">
-            <div className="flex justify-between items-center mb-3">
-              <span className="text-xs font-bold tracking-widest uppercase">{t('pdp.color')}: <span className="text-gray-500">{selectedColor}</span></span>
-            </div>
-            <div className="flex space-x-3">
-              {product.colors.map(color => (
-                <button 
-                  key={color}
-                  onClick={() => setSelectedColor(color)}
-                  className={`w-8 h-8 rounded-full border-2 transition-all ${selectedColor === color ? 'border-black scale-110' : 'border-gray-200 hover:border-gray-400'}`}
-                  style={{ backgroundColor: color === '#000000' ? '#111' : color }}
-                  title={color}
-                />
-              ))}
-            </div>
-          </div>
-
-          {/* Wariant Główny: Rozmiar */}
-          <div className="mb-8">
-            <div className="flex justify-between items-center mb-3">
-              <span className="text-xs font-bold tracking-widest uppercase">{t('pdp.size')}: <span className="text-gray-500">{selectedSize || ''}</span></span>
-              <a href="#" className="text-xs font-bold tracking-widest underline text-gray-500 hover:text-black">{t('pdp.size_guide')}</a>
-            </div>
-            <div className="grid grid-cols-5 gap-2">
-              {sizes.map(size => (
-                <button 
-                  key={size}
-                  onClick={() => setSelectedSize(size)}
-                  className={`py-3 text-xs font-bold tracking-widest border transition-all ${selectedSize === size ? 'bg-black text-white border-black' : 'bg-white text-black border-gray-200 hover:border-black'}`}
+            {Array.isArray(product.variants) && product.variants.length > 0 && (
+              <div className="mt-8">
+                <label className="block text-xs tracking-[0.18em] uppercase text-black/60">Wybierz opcję</label>
+                <select
+                  value={variantId}
+                  onChange={(e) => setVariantId(e.target.value)}
+                  className="mt-3 w-full h-12 px-4 rounded-2xl border border-black/10 bg-white focus:outline-none focus:border-accent-cyan"
                 >
-                  {size}
+                  {product.variants.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      {v.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="mt-8 flex flex-col sm:flex-row gap-3 sm:items-center">
+              <div className="inline-flex items-center rounded-2xl border border-black/10 bg-white h-12">
+                <button
+                  type="button"
+                  className="h-12 w-12 inline-flex items-center justify-center"
+                  onClick={() => setQuantity((q) => Math.max(1, q - 1))}
+                  aria-label="Zmniejsz ilość"
+                >
+                  <Minus className="h-4 w-4" />
                 </button>
-              ))}
-            </div>
-            {selectedSize === 'S' && <p className="text-red-500 text-xs font-bold tracking-widest mt-2">{t('pdp.low_stock')}</p>}
-          </div>
-
-          {/* Upsell / Bundles Section z wyborem sub-wariantów */}
-          <div className="mb-10 space-y-3">
-            <span className="text-xs font-bold tracking-widest uppercase block mb-4">WYBIERZ ZESTAW ZAPŁAĆ MNIEJ</span>
-            
-            {/* Opcja 1: Jeden przedmiot */}
-            <div 
-              className={`border cursor-pointer transition-all ${bundleOption === 1 ? 'border-black bg-gray-50' : 'border-gray-200 hover:border-gray-400'}`}
-              onClick={() => handleBundleOptionChange(1)}
-            >
-              <div className="flex items-center justify-between p-4">
-                <div className="flex items-center space-x-3">
-                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${bundleOption === 1 ? 'border-black' : 'border-gray-300'}`}>
-                    {bundleOption === 1 && <div className="w-2.5 h-2.5 bg-black rounded-full"></div>}
-                  </div>
-                  <div>
-                    <span className="text-sm font-bold tracking-widest uppercase block">{t('pdp.bundle.one_item')}</span>
-                    <span className="text-xs text-gray-500">{t('pdp.bundle.standard_price')}</span>
-                  </div>
-                </div>
-                <span className="text-sm font-bold">{product.price}</span>
-              </div>
-            </div>
-
-            {/* Opcja 2: Dwa przedmioty (-10%) z rozwijanym oknem wyboru drugiego */}
-            <div 
-              className={`border cursor-pointer transition-all relative ${bundleOption === 2 ? 'border-black border-2 bg-white' : 'border-gray-200 hover:border-gray-400'}`}
-              onClick={() => handleBundleOptionChange(2)}
-            >
-              {bundleOption === 2 && (
-                <div className="absolute -top-3 right-4 bg-black text-white text-[10px] font-bold px-2 py-1 tracking-widest z-10">
-                  {t('pdp.bundle.most_popular')}
-                </div>
-              )}
-              <div className="flex items-center justify-between p-4">
-                <div className="flex items-center space-x-3">
-                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${bundleOption === 2 ? 'border-black' : 'border-gray-300'}`}>
-                    {bundleOption === 2 && <div className="w-2.5 h-2.5 bg-black rounded-full"></div>}
-                  </div>
-                  <div>
-                    <span className="text-sm font-bold tracking-widest uppercase block">{t('pdp.bundle.two_items')}</span>
-                    <span className="text-xs text-gray-500">{t('pdp.bundle.you_save')} {(basePriceNum * 2 * 0.1).toFixed(2)} PLN</span>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm font-bold block">{(basePriceNum * 2 * 0.9).toFixed(2)} PLN</span>
-                  <span className="text-xs text-gray-400 line-through">{(basePriceNum * 2).toFixed(2)} PLN</span>
-                </div>
-              </div>
-
-              {/* Sub-wybór dodatkowych przedmiotów widoczny tylko jeśli wybrano opcję 2 */}
-              {bundleOption === 2 && (
-                <div className="px-4 pb-4 pt-2 border-t border-gray-100 flex flex-col space-y-4">
-                  {extraBundleItems.map((item, index) => (
-                    <div key={item.uid} className="flex items-start space-x-4 border-b border-gray-100 pb-4 last:border-0 last:pb-0 relative">
-                      <div className="w-20 h-24 bg-gray-100 border border-gray-200 flex-shrink-0 flex items-center justify-center p-2">
-                        <img src={item.product.images[0]} alt="Extra item" className="w-full h-full object-contain" />
-                      </div>
-                      <div className="flex-grow">
-                        <span className="text-xs font-bold uppercase mb-2 block pr-6">{item.product.title[i18n.language]}</span>
-                        <div className="flex space-x-2 mb-3">
-                          <select 
-                            value={item.color}
-                            onChange={(e) => updateExtraItem(item.uid, 'color', e.target.value)}
-                            className="border border-gray-300 text-xs py-1 px-2 uppercase bg-white cursor-pointer"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {item.product.colors.map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
-                          <select 
-                            value={item.size}
-                            onChange={(e) => updateExtraItem(item.uid, 'size', e.target.value)}
-                            className="border border-gray-300 text-xs py-1 px-2 uppercase bg-white cursor-pointer"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {sizes.map(s => <option key={s} value={s}>{s}</option>)}
-                          </select>
-                        </div>
-                      </div>
-                      <button 
-                        onClick={(e) => removeExtraItem(item.uid, e)}
-                        className="absolute top-0 right-0 p-1 text-gray-400 hover:text-black hover:bg-gray-100 rounded-full transition-colors"
-                        title="Usuń przedmiot"
-                      >
-                        <X size={16} />
-                      </button>
-                    </div>
-                  ))}
-                  
-                  {extraBundleItems.length < 1 && (
-                    <button 
-                      onClick={(e) => openProductSelector(e)}
-                      className="w-full py-4 border-2 border-dashed border-gray-300 flex items-center justify-center space-x-2 text-gray-500 hover:text-black hover:border-black transition-colors"
-                    >
-                      <Plus size={20} />
-                      <span className="text-xs font-bold uppercase tracking-widest">DODAJ DRUGI PRZEDMIOT</span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Opcja 3: 3 + 1 Gratis */}
-            <div 
-              className={`border cursor-pointer transition-all ${bundleOption === 3 ? 'border-black border-2 bg-gray-50' : 'border-gray-200 hover:border-gray-400'}`}
-              onClick={() => handleBundleOptionChange(3)}
-            >
-              <div className="flex items-center justify-between p-4">
-                <div className="flex items-center space-x-3">
-                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${bundleOption === 3 ? 'border-black' : 'border-gray-300'}`}>
-                    {bundleOption === 3 && <div className="w-2.5 h-2.5 bg-black rounded-full"></div>}
-                  </div>
-                  <div>
-                    <span className="text-sm font-bold tracking-widest uppercase block">{t('pdp.bundle.get_3_1_free')} <span className="bg-gray-200 text-black text-[10px] px-1 ml-1">{t('pdp.bundle.free_shipping')}</span></span>
-                  </div>
-                </div>
-                <span className="text-sm font-bold">{(basePriceNum * 3).toFixed(2)} PLN</span>
-              </div>
-
-              {/* Sub-wybór dodatkowych przedmiotów widoczny tylko jeśli wybrano opcję 3 */}
-              {bundleOption === 3 && (
-                <div className="px-4 py-4 bg-gray-300/50 border-t border-gray-200 flex flex-col space-y-4">
-                  {extraBundleItems.map((item, index) => (
-                    <div key={item.uid} className="flex items-start space-x-4 border-b border-gray-300 pb-4 last:border-0 last:pb-0 relative">
-                      <div className="w-20 h-24 bg-white border border-gray-200 flex-shrink-0 flex items-center justify-center p-2">
-                        <img src={item.product.images[0]} alt="Extra item" className="w-full h-full object-contain" />
-                      </div>
-                      <div className="flex-grow">
-                        <span className="text-xs font-bold uppercase mb-2 block pr-6">{item.product.title[i18n.language]}</span>
-                        <div className="flex space-x-2 mb-3">
-                          <select 
-                            value={item.color}
-                            onChange={(e) => updateExtraItem(item.uid, 'color', e.target.value)}
-                            className="border border-gray-400 text-xs py-1 px-2 uppercase bg-transparent cursor-pointer"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {item.product.colors.map(c => <option key={c} value={c}>{c}</option>)}
-                          </select>
-                          <select 
-                            value={item.size}
-                            onChange={(e) => updateExtraItem(item.uid, 'size', e.target.value)}
-                            className="border border-gray-400 text-xs py-1 px-2 uppercase bg-transparent cursor-pointer"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {sizes.map(s => <option key={s} value={s}>{s}</option>)}
-                          </select>
-                        </div>
-                      </div>
-                      <button 
-                        onClick={(e) => removeExtraItem(item.uid, e)}
-                        className="absolute top-0 right-0 p-1 text-gray-500 hover:text-black hover:bg-gray-200 rounded-full transition-colors"
-                        title="Usuń przedmiot"
-                      >
-                        <X size={16} />
-                      </button>
-                    </div>
-                  ))}
-                  
-                  {extraBundleItems.length < 3 && (
-                    <button 
-                      onClick={(e) => openProductSelector(e)}
-                      className="w-full py-4 border-2 border-dashed border-gray-400 flex items-center justify-center space-x-2 text-gray-600 hover:text-black hover:border-black transition-colors"
-                    >
-                      <Plus size={20} />
-                      <span className="text-xs font-bold uppercase tracking-widest">DODAJ PRZEDMIOT ({extraBundleItems.length}/3)</span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* CTA & Trust */}
-          <div className="sticky bottom-0 left-0 w-full md:relative bg-white md:bg-transparent p-4 md:p-0 border-t md:border-t-0 border-gray-200 z-50 mb-8">
-            <button 
-              onClick={handleAddToCart}
-              className={`w-full py-5 text-sm font-bold tracking-widest uppercase transition-all ${selectedSize ? 'bg-black text-white hover:bg-gray-800' : 'bg-gray-200 text-gray-500 cursor-not-allowed'}`}
-              disabled={!selectedSize}
-            >
-              {selectedSize ? `${t('pdp.add_to_cart')} - ${formattedPrice}` : t('pdp.select_options')}
-            </button>
-            <div className="hidden md:flex justify-center mt-4">
-              <PaymentIcons />
-            </div>
-          </div>
-
-          {/* Accordion Details */}
-          <div className="border-t border-gray-200">
-            {/* Opcja 1 */}
-            <div className="border-b border-gray-200">
-              <button 
-                onClick={() => setOpenAccordion(openAccordion === 'details' ? '' : 'details')}
-                className="w-full flex justify-between items-center py-5 text-xs font-bold tracking-widest uppercase"
-              >
-                {t('pdp.accordion_details')}
-                {openAccordion === 'details' ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              </button>
-              {openAccordion === 'details' && (
-                <div className="pb-5 text-sm text-gray-600 leading-relaxed">
-                  <p>{product.description[i18n.language]}</p>
-                  {product.details && product.details[i18n.language] && (
-                    <ul className="list-disc pl-5 mt-3 space-y-1">
-                      {product.details[i18n.language].map((detail, i) => (
-                        <li key={i}>{detail}</li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-            </div>
-            
-            {/* Opcja 2 */}
-            <div className="border-b border-gray-200">
-              <button 
-                onClick={() => setOpenAccordion(openAccordion === 'material' ? '' : 'material')}
-                className="w-full flex justify-between items-center py-5 text-xs font-bold tracking-widest uppercase"
-              >
-                {t('pdp.accordion_material')}
-                {openAccordion === 'material' ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              </button>
-              {openAccordion === 'material' && (
-                <div className="pb-5 text-sm text-gray-600 leading-relaxed whitespace-pre-line">
-                  {product.material[i18n.language]}
-                </div>
-              )}
-            </div>
-
-            {/* Opcja 3 */}
-            <div className="border-b border-gray-200">
-              <button 
-                onClick={() => setOpenAccordion(openAccordion === 'shipping' ? '' : 'shipping')}
-                className="w-full flex justify-between items-center py-5 text-xs font-bold tracking-widest uppercase"
-              >
-                {t('pdp.accordion_shipping')}
-                {openAccordion === 'shipping' ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              </button>
-              {openAccordion === 'shipping' && (
-                <div className="pb-5 text-sm text-gray-600 leading-relaxed">
-                  <p>Wysyłka realizowana w ciągu 24-48 godzin roboczych.</p>
-                  <p className="mt-2">Darmowe zwroty do 30 dni za pośrednictwem Paczkomatów InPost.</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-        </div>
-      </div>
-
-      {/* Product Selector Modal */}
-      {isModalOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setIsModalOpen(false)}>
-          <div 
-            className="bg-white w-full max-w-lg max-h-[80vh] flex flex-col shadow-2xl"
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50">
-              <h3 className="font-bold tracking-widest uppercase text-sm">{t('pdp.bundle.choose_product')}</h3>
-              <button onClick={() => setIsModalOpen(false)} className="p-1 hover:bg-gray-200 rounded-full transition-colors">
-                <X size={20} />
-              </button>
-            </div>
-            
-            <div className="overflow-y-auto p-4 space-y-4 flex-grow">
-              {allProducts.map(prod => (
-                <div 
-                  key={prod.id} 
-                  className="flex items-center space-x-4 p-3 border border-gray-200 hover:border-black cursor-pointer transition-colors"
-                  onClick={() => handleSelectProduct(prod)}
+                <div className="px-4 font-semibold tabular-nums">{quantity}</div>
+                <button
+                  type="button"
+                  className="h-12 w-12 inline-flex items-center justify-center"
+                  onClick={() => setQuantity((q) => q + 1)}
+                  aria-label="Zwiększ ilość"
                 >
-                  <div className="w-20 h-24 bg-gray-100 flex-shrink-0 p-2 flex items-center justify-center">
-                    <img src={prod.images[0]} alt="" className="w-full h-full object-contain" />
-                  </div>
-                  <div className="flex-grow">
-                    <p className="text-xs font-bold uppercase mb-1">{prod.title[i18n.language]}</p>
-                    <p className="text-xs text-gray-500">{prod.price}</p>
-                  </div>
-                  <div className="px-4">
-                    <div className="w-8 h-8 rounded-full border border-gray-300 flex items-center justify-center hover:bg-black hover:text-white transition-colors">
-                      <Plus size={16} />
-                    </div>
-                  </div>
-                </div>
-              ))}
+                  <Plus className="h-4 w-4" />
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={addToCart}
+                disabled={!canAddToCart}
+                className="h-12 flex-1 rounded-2xl bg-black text-white font-semibold tracking-[0.18em] uppercase text-[12px] hover:bg-ink transition-colors disabled:opacity-50"
+              >
+                Dodaj do koszyka
+              </button>
+            </div>
+
+            <div className="mt-8 rounded-2xl border border-black/10 bg-white p-5">
+              <p className="text-sm text-black/70">
+                Ten sam produkt w różnych wariantach dodajemy do koszyka jako osobne pozycje.
+              </p>
             </div>
           </div>
         </div>
-      )}
 
+        {similar.length > 0 && (
+          <div className="mt-16">
+            <h2 className="text-2xl md:text-3xl font-black tracking-tight">Podobne produkty</h2>
+            <div className="mt-8 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+              {similar.map((p) => (
+                <ProductCard key={p.id} product={p} />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   )
 }

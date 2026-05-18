@@ -1,27 +1,40 @@
 import React, { useState, useEffect } from 'react'
-import { useTranslation } from 'react-i18next'
 import { useViewContext } from '../context/ViewContext'
 
+function formatPrice(value, currency) {
+  const safe = Number(value)
+  if (!Number.isFinite(safe)) return ''
+  const symbol = currency === 'PLN' ? 'zł' : currency
+  return `${safe.toFixed(2).replace('.', ',')} ${symbol}`
+}
+
 export default function ProductCard({ product }) {
-  const { i18n } = useTranslation();
-  const { gridView } = useViewContext();
-  const [imgIndex, setImgIndex] = useState(0);
-  const [isHovered, setIsHovered] = useState(false);
+  const { gridView } = useViewContext()
+  const [imgIndex, setImgIndex] = useState(0)
+  const [isHovered, setIsHovered] = useState(false)
+
+  const images = Array.isArray(product?.images)
+    ? product.images
+        .map((x) => (typeof x === 'string' ? x : x?.url))
+        .filter(Boolean)
+    : []
 
   useEffect(() => {
-    let interval;
-    if (isHovered && product.images && product.images.length > 1) {
+    let interval
+    if (isHovered && images.length > 1) {
       interval = setInterval(() => {
-        setImgIndex((prev) => (prev + 1) % product.images.length);
-      }, 3000);
+        setImgIndex((prev) => (prev + 1) % images.length)
+      }, 3000)
     } else {
-      setImgIndex(0); // Reset do głównego obrazka po opuszczeniu hovera
+      setImgIndex(0)
     }
-    return () => clearInterval(interval);
-  }, [isHovered, product.images]);
+    return () => clearInterval(interval)
+  }, [isHovered, images.length])
 
-  const currentImage = product.images[imgIndex];
-  const isMinimal = gridView === 'minimal';
+  const currentImage = images[imgIndex] || images[0]
+  const isMinimal = gridView === 'minimal'
+  const title = product?.name || ''
+  const priceLabel = formatPrice(product?.basePrice, product?.currency)
 
   return (
     <a 
@@ -30,40 +43,43 @@ export default function ProductCard({ product }) {
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      <div className={`w-full bg-[#0a0a0a] overflow-hidden border border-[#222] relative flex items-center justify-center p-fluid-sm group-hover:border-[#444] transition-colors duration-500 ${isMinimal ? 'aspect-square mb-0' : 'aspect-[3/4] mb-fluid-sm'}`}>
-        <img 
-          src={currentImage} 
-          alt={product.title[i18n.language]} 
-          className="w-full h-full object-contain opacity-80 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500 ease-out" 
-        />
-        {/* Wskaźnik liczby zdjęć tylko dla minimal view na hoverze */}
-        {isMinimal && isHovered && product.images.length > 1 && (
-          <div className="absolute bottom-2 right-2 flex space-x-1">
-            {product.images.map((_, i) => (
-              <span key={i} className={`w-1.5 h-1.5 rounded-full ${i === imgIndex ? 'bg-white' : 'bg-gray-600'}`}></span>
-            ))}
-          </div>
-        )}
-      </div>
+      <div className="w-full bg-paper text-black overflow-hidden border border-black/5 rounded-2xl group-hover:shadow-lg transition-shadow">
+        <div className={`relative flex items-center justify-center ${isMinimal ? 'aspect-square' : 'aspect-[3/4]'}`}>
+          {currentImage ? (
+            <img 
+              src={currentImage} 
+              alt={title}
+              className="w-full h-full object-contain p-6 opacity-95 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500 ease-out" 
+            />
+          ) : (
+            <div className="w-full h-full p-6 flex items-center justify-center">
+              <div className="h-24 w-24 rounded-2xl bg-gradient-to-br from-accent-deep/20 to-accent-cyan/25" />
+            </div>
+          )}
+          {isMinimal && isHovered && images.length > 1 && (
+            <div className="absolute bottom-3 right-3 flex space-x-1">
+              {images.map((_, i) => (
+                <span
+                  key={i}
+                  className={`w-1.5 h-1.5 rounded-full ${i === imgIndex ? 'bg-accent-cyan' : 'bg-black/20'}`}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       
       {!isMinimal && (
-        <div className="flex flex-col items-start text-left">
-          <span className="text-fluid-xs tracking-widest font-medium mb-1 text-gray-100 metal-text-hover group-hover:metal-text-hover uppercase">
-            {product.title[i18n.language]}
-          </span>
-          <span className="text-fluid-sm text-gray-500 mb-3">{product.price}</span>
-          
-          <div className="flex space-x-1.5">
-            {product.colors.map((color, idx) => (
-              <span 
-                key={idx} 
-                className="w-3 h-3 md:w-4 md:h-4 rounded-full border border-[#444]"
-                style={{ backgroundColor: color === '#000000' ? '#222' : color }}
-              ></span>
-            ))}
+        <div className="px-5 pb-5">
+          <h3 className="pt-4 text-base md:text-lg font-semibold tracking-tight text-black leading-snug">
+            {title}
+          </h3>
+          <div className="mt-3 pt-3 border-t border-black/10 flex items-center justify-between">
+            <span className="text-sm text-black/70 font-medium">{priceLabel}</span>
+            <span className="text-[11px] tracking-[0.22em] text-black/45 uppercase">Zobacz</span>
           </div>
         </div>
       )}
+      </div>
     </a>
   )
 }

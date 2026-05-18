@@ -1,44 +1,71 @@
-import React from 'react'
-import { useTranslation } from 'react-i18next'
-import HighlandPattern from './HighlandPattern'
-import { ArrowRight } from 'lucide-react'
-import { categoriesData } from '../data/products'
+import React, { useEffect, useMemo, useState } from 'react'
+import { getProducts } from '../api/catalog'
 import ProductCard from './ProductCard'
 import { useViewContext } from '../context/ViewContext'
 
 export default function Drop01Section() {
-  const { i18n } = useTranslation()
   const { gridView } = useViewContext()
+  const [products, setProducts] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
-  const drop = categoriesData.find((c) => c.id === 'drop01')
-  if (!drop) return null
+  useEffect(() => {
+    let mounted = true
+    setLoading(true)
+    setError('')
+    getProducts()
+      .then((data) => {
+        if (!mounted) return
+        setProducts(Array.isArray(data?.products) ? data.products : [])
+        setLoading(false)
+      })
+      .catch((err) => {
+        if (!mounted) return
+        setError(err?.message || 'Błąd ładowania produktów')
+        setLoading(false)
+      })
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  const visibleProducts = useMemo(() => {
+    return products.slice(0, gridView === 'minimal' ? 12 : 6)
+  }, [products, gridView])
 
   return (
-    <section id="drop01" className="relative w-full bg-[#0a0a0a] text-white overflow-hidden m-0 p-0">
-      <HighlandPattern />
-      <div className="relative z-10 pb-fluid-xl pt-0 m-0">
-        <div className="w-full bg-black py-fluid-sm mb-fluid-md flex items-center justify-start px-fluid-sm m-0 border-y border-[#222]">
-          <div className="flex items-center space-x-fluid-sm text-white">
-            <ArrowRight className="w-8 h-8 md:w-10 md:h-10" strokeWidth={3} />
-            <h2 className="text-fluid-xl font-montserrat tracking-wide uppercase" style={{ fontWeight: 900 }}>
-              {drop.title[i18n.language]}
+    <section id="katalog" className="w-full bg-paper text-black py-fluid-md">
+      <div className="max-w-[1800px] mx-auto px-fluid-sm">
+        <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
+          <div>
+            <p className="text-accent-cyan text-xs font-semibold tracking-[0.22em] uppercase">
+              Co nowego w sklepie?
+            </p>
+            <h2 className="mt-2 text-4xl md:text-5xl font-black tracking-tight">
+              Nowości
             </h2>
+          </div>
+          <div className="text-sm text-black/60 max-w-xl">
+            {loading ? 'Ładowanie produktów…' : error ? error : `Dostępne produkty: ${products.length}`}
           </div>
         </div>
 
-        <div className="max-w-[1800px] mx-auto px-fluid-sm">
-          <div className={`grid gap-x-fluid-sm gap-y-fluid-md ${
-            gridView === 'minimal' 
-              ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-3'
-              : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3'
-          }`}>
-            {drop.products.slice(0, 3).map((product) => (
-              <ProductCard key={product.id} product={product} />
-            ))}
-          </div>
+        <div className={`mt-10 grid gap-4 ${
+          gridView === 'minimal'
+            ? 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6'
+            : 'grid-cols-2 sm:grid-cols-3 lg:grid-cols-3 xl:grid-cols-4'
+        }`}>
+          {visibleProducts.map((product) => (
+            <ProductCard key={product.id} product={product} />
+          ))}
         </div>
+
+        {!loading && !error && products.length === 0 && (
+          <div className="mt-10 rounded-2xl border border-black/10 bg-white p-6 text-black/70">
+            Brak produktów w bazie. Wejdź w panel /admin i dodaj pierwszy produkt.
+          </div>
+        )}
       </div>
     </section>
   )
 }
-

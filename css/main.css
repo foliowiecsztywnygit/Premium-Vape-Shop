@@ -15,6 +15,10 @@
     /* Offset for fixed header when scrolling to anchor links */
     scroll-padding-top: 140px; 
   }
+
+  body {
+    @apply bg-ink text-white font-sans antialiased;
+  }
 }
 
 @layer utilities {

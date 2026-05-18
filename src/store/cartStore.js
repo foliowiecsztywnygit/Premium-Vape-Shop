@@ -40,7 +40,7 @@ export const useCartStore = create(
       }
     }),
     {
-      name: 'tatragrail-cart',
+      name: 'pvs-cart',
     }
   )
 );

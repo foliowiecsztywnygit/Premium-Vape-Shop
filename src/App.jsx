@@ -1,25 +1,27 @@
 import React, { useState, useEffect } from 'react'
 import Header from './components/Header'
 import Footer from './components/Footer'
+import Hero from './components/Hero'
 import Drop01Section from './components/Drop01Section'
+import PromoSection from './components/PromoSection'
+import AboutSection from './components/AboutSection'
+import ContactSection from './components/ContactSection'
 import ProductPage from './pages/ProductPage'
 import CartDrawer from './components/CartDrawer'
 import CheckoutPage from './pages/CheckoutPage'
-import TrackingPage from './pages/TrackingPage'
-import PaymentStatusPage from './pages/PaymentStatusPage'
-import DropGatePage from './pages/DropGatePage'
+import AdminPage from './pages/AdminPage'
+import ShopPage from './pages/ShopPage'
+import BookingSuccessPage from './pages/BookingSuccessPage'
+import AdminDashboardPage from './pages/AdminDashboardPage'
 import { ViewProvider } from './context/ViewContext'
-import { getProductById } from './data/products'
 
 export default function App() {
-  const [currentPath, setCurrentPath] = useState(window.location.pathname);
-  const [dropUnlocked, setDropUnlocked] = useState(() => !!localStorage.getItem('tatragrail-drop-token'));
-  const [now, setNow] = useState(Date.now());
+  const [currentPath, setCurrentPath] = useState(window.location.pathname)
 
   useEffect(() => {
     // Prosty nasłuch na zmiany w URL dla Vanilla React bez react-router
     const onLocationChange = () => {
-      setCurrentPath(window.location.pathname);
+      setCurrentPath(window.location.pathname)
     };
     
     // Nadpisanie pushState dla gładkiej nawigacji
@@ -48,50 +50,42 @@ export default function App() {
       window.removeEventListener('popstate', onLocationChange);
       document.removeEventListener('click', handleClick);
     };
-  }, []);
-
-  useEffect(() => {
-    const id = setInterval(() => setNow(Date.now()), 500);
-    return () => clearInterval(id);
-  }, []);
-
-  const dropStartAt = import.meta.env.VITE_DROP_START_AT;
-  const dropStartMs = dropStartAt ? new Date(dropStartAt).getTime() : null;
-  const isDropLocked = Number.isFinite(dropStartMs) && now < dropStartMs && !dropUnlocked;
-  const isBypassRoute = currentPath.startsWith('/tracking/') || currentPath === '/payment-status';
+  }, [])
 
   // Prosty router
   let content;
-  if (isDropLocked && !isBypassRoute) {
-    content = <DropGatePage dropStartAt={dropStartAt} onUnlocked={() => setDropUnlocked(true)} />;
-  } else if (currentPath.startsWith('/product/')) {
+  if (currentPath.startsWith('/product/')) {
     const id = currentPath.split('/')[2];
-    const product = getProductById(id);
-    
-    if (product) {
-      content = <ProductPage product={product} />;
-    } else {
-      content = <div className="min-h-screen flex items-center justify-center pt-32 text-white">Product not found</div>;
-    }
+    content = <ProductPage id={id} />
+  } else if (currentPath === '/shop' || currentPath === '/shop/') {
+    content = <ShopPage />
+  } else if (currentPath.startsWith('/shop/')) {
+    const slug = currentPath.split('/')[2];
+    content = <ShopPage slug={slug} />
+  } else if (currentPath === '/booking-success') {
+    content = <BookingSuccessPage />
+  } else if (currentPath === '/admin/dashboard') {
+    content = <AdminDashboardPage />
+  } else if (currentPath === '/admin') {
+    content = <AdminPage />
   } else if (currentPath === '/checkout') {
     content = <CheckoutPage />;
-  } else if (currentPath === '/payment-status') {
-    content = <PaymentStatusPage />;
-  } else if (currentPath.startsWith('/tracking/')) {
-    const token = currentPath.split('/')[2];
-    content = <TrackingPage token={token} />;
   } else {
     // Home
     content = (
       <>
+        <Hero />
         <Drop01Section />
+        <PromoSection />
+        <AboutSection />
+        <ContactSection />
       </>
     );
   }
 
   return (
     <ViewProvider>
-      <div className="font-sans antialiased text-black">
+      <div className="min-h-screen font-sans antialiased bg-ink text-white">
         <Header />
         <CartDrawer />
         <main>

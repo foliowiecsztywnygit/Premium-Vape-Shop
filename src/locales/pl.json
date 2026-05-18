@@ -1,11 +1,11 @@
 {
   "translation": {
     "header": {
-      "topbar": "● DARMOWE DOSTAWY DO CAŁEJ POLSKI POWYŻEJ 250PLN",
+      "topbar": "● DARMOWA DOSTAWA OD 250 ZŁ",
       "home": "HOME",
-      "originals": "KOLEKCJA TATRAGRAIL",
-      "mokasynek": "MOKASYNEK",
-      "drop": "DROP"
+      "originals": "SKLEP",
+      "mokasynek": "PROMOCJE",
+      "drop": "KONTAKT"
     },
     "hero": {
       "title_1": "DLO PANECKÓW I",
@@ -37,7 +37,7 @@
       "accordion_shipping": "WYSYŁKA I ZWROTY"
     },
     "footer": {
-      "statement": "STERILE AESTHETICS. HIGH FASHION STREETWEAR. NO COMPROMISES. DESIGNED FOR THE AVANT-GARDE.",
+      "statement": "Premium Vape Shop Ursynów — lokalny sklep premium na Belgradzkiej 14 w Warszawie.",
       "info_title": "INFO",
       "links": {
         "shipping": "WYSYŁKA I ZWROTY",
@@ -49,7 +49,7 @@
         "title": "NEWSLETTER",
         "placeholder": "WPISZ SWÓJ EMAIL"
       },
-      "copyright": "© 2026 TATRAGRAIL. WSZELKIE PRAWA ZASTRZEŻONE."
+      "copyright": "© 2026 Premium Vape Shop Ursynów. Wszelkie prawa zastrzeżone."
     }
   }
 }

@@ -12,7 +12,7 @@ datasource db {
 
 model Order {
   id               String      @id @default(uuid())
-  orderNumber      String      @unique // e.g. TG-2026-000123
+  orderNumber      String      @unique // e.g. PVS-2026-000123
   email            String
   firstName        String
   lastName         String
@@ -72,6 +72,71 @@ model OrderItem {
   productName String
 }
 
+model Category {
+  id        String    @id @default(uuid())
+  slug      String    @unique
+  name      String
+  active    Boolean   @default(true)
+  sortOrder Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  products  Product[]
+}
+
+model Product {
+  id          String          @id @default(uuid())
+  slug        String          @unique
+  name        String
+  description String?
+  basePrice   Float
+  currency    String          @default("PLN")
+  active      Boolean         @default(true)
+  sortOrder   Int             @default(0)
+
+  categoryId  String?
+  category    Category?       @relation(fields: [categoryId], references: [id])
+
+  images      ProductImage[]
+  variants    ProductVariant[]
+
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+}
+
+model ProductImage {
+  id        String   @id @default(uuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  url       String
+  alt       String?
+  sortOrder Int      @default(0)
+}
+
+model ProductVariant {
+  id          String   @id @default(uuid())
+  productId   String
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name        String
+  sku         String?
+  price       Float?
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0)
+}
+
+model AdminConfig {
+  id           String   @id @default("default")
+  passwordHash String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model AdminSession {
+  token     String   @id
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
 model PromoCode {
   id             String    @id @default(uuid())
   code           String    @unique
@@ -85,4 +150,10 @@ model PromoCode {
   collectionScope String?
   minimumCartValue Float?
   partnerId      String?
+}
+
+model BookingIpLimit {
+  ip        String   @id
+  bookingId String?
+  createdAt DateTime @default(now())
 }

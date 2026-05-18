@@ -1,11 +1,11 @@
 {
   "translation": {
     "header": {
-      "topbar": "● FREE WORLDWIDE SHIPPING ON ORDERS OVER 250PLN",
+      "topbar": "● FREE SHIPPING FROM 250 PLN",
       "home": "HOME",
-      "originals": "TATRAGRAIL COLLECTION",
-      "mokasynek": "MOKASYNEK",
-      "drop": "DROP"
+      "originals": "SHOP",
+      "mokasynek": "PROMOTIONS",
+      "drop": "CONTACT"
     },
     "hero": {
       "title_1": "FOR LORDS AND",
@@ -38,7 +38,7 @@
       "accordion_shipping": "SHIPPING & RETURNS"
     },
     "footer": {
-      "statement": "STERILE AESTHETICS. HIGH FASHION STREETWEAR. NO COMPROMISES. DESIGNED FOR THE AVANT-GARDE.",
+      "statement": "Premium Vape Shop Ursynów — premium local store in Warsaw (Belgradzka 14).",
       "info_title": "INFO",
       "links": {
         "shipping": "SHIPPING & RETURNS",
@@ -50,7 +50,7 @@
         "title": "NEWSLETTER",
         "placeholder": "ENTER YOUR EMAIL"
       },
-      "copyright": "© 2026 TATRAGRAIL. ALL RIGHTS RESERVED."
+      "copyright": "© 2026 Premium Vape Shop Ursynów. All rights reserved."
     }
   }
 }
