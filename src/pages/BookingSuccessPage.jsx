@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { getSupabaseBrowser } from '../supabase/client'
+import { apiFetch } from '../api/client'
 
 function formatPrice(value, currency = 'PLN') {
   const safe = Number(value)
@@ -41,23 +41,17 @@ export default function BookingSuccessPage() {
       }
     } catch {}
 
-    const supabase = getSupabaseBrowser()
-    if (!supabase || !bookingId) {
+    if (!bookingId) {
       setLoading(false)
       return () => {
         mounted = false
       }
     }
 
-    supabase
-      .from('bookings')
-      .select('*')
-      .eq('id', bookingId)
-      .single()
-      .then(({ data, error }) => {
+    apiFetch(`/api/bookings/${encodeURIComponent(bookingId)}`)
+      .then((data) => {
         if (!mounted) return
-        if (error) throw new Error(error.message)
-        setBooking(data)
+        setBooking(data?.booking || null)
         setLoading(false)
       })
       .catch((err) => {
@@ -75,14 +69,14 @@ export default function BookingSuccessPage() {
   const currency = booking?.currency || 'PLN'
   const total = booking?.total ?? booking?.subtotal
 
-  const pickupLabel = booking?.pickup_time
+  const pickupLabel = booking?.pickupTime
     ? new Intl.DateTimeFormat('pl-PL', {
         weekday: 'long',
         day: '2-digit',
         month: '2-digit',
         hour: '2-digit',
         minute: '2-digit',
-      }).format(new Date(booking.pickup_time))
+      }).format(new Date(booking.pickupTime))
     : null
 
   return (
@@ -162,4 +156,3 @@ export default function BookingSuccessPage() {
     </div>
   )
 }
-

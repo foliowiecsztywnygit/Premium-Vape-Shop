@@ -1,5 +1,5 @@
-import { getSupabaseAdmin } from '../_supabaseAdmin.js'
 import { getPosSettings } from './_posSettings.js'
+import { getPrisma } from '../../server/prisma.js'
 
 function toNumber(value) {
   const n = Number(value)
@@ -13,25 +13,38 @@ function normalizeItems(items) {
     .filter(Boolean)
 }
 
-async function updateLastSync(supabase, id) {
-  await supabase.from('pos_settings').update({ last_sync_time: new Date().toISOString() }).eq('id', id)
+async function updateLastSync(id) {
+  const prisma = getPrisma()
+  await prisma.posSetting.update({
+    where: { id },
+    data: { lastSyncAt: new Date() },
+  })
 }
 
-async function updateProductsByField(supabase, field, updates) {
+function mapMatchField(field) {
+  if (field === 'external_pos_id') return 'externalPosId'
+  if (field === 'stock_quantity') return 'stockQuantity'
+  return field
+}
+
+async function updateProductsByField(prisma, field, updates) {
   const results = []
+  const prismaField = mapMatchField(field)
   for (const u of updates) {
     const matchValue = u.matchValue
     if (!matchValue) continue
     const patch = u.patch
-    const { error } = await supabase.from('products').update(patch).eq(field, matchValue)
-    if (error) throw new Error('Product update failed')
-    results.push({ field, matchValue })
+    await prisma.product.updateMany({
+      where: { [prismaField]: matchValue },
+      data: patch,
+    })
+    results.push({ field: prismaField, matchValue })
   }
   return results
 }
 
 export async function syncStock({ storeId, provider, matchField, items }) {
-  const supabase = getSupabaseAdmin()
+  const prisma = getPrisma()
   const settings = await getPosSettings({ storeId, provider })
 
   const normalized = normalizeItems(items)
@@ -54,28 +67,27 @@ export async function syncStock({ storeId, provider, matchField, items }) {
 
       const stock_quantity = Math.max(0, Math.trunc(qty))
       const patch = {
-        stock_quantity,
-        is_available: stock_quantity > 0,
-        ...(price != null ? { price } : {}),
+        stockQuantity: stock_quantity,
+        isAvailable: stock_quantity > 0,
+        ...(price != null ? { basePrice: price } : {}),
       }
       return { matchValue: String(matchValue || '').trim(), patch }
     })
     .filter(Boolean)
 
-  const updated = await updateProductsByField(supabase, matchField, updates)
-  await updateLastSync(supabase, settings.id)
+  const updated = await updateProductsByField(prisma, matchField, updates)
+  await updateLastSync(settings.id)
 
   return { updated: updated.length }
 }
 
 export async function syncDotykackaStock({ storeId }) {
-  const supabase = getSupabaseAdmin()
   const settings = await getPosSettings({ storeId, provider: 'dotykacka' })
-  if (!settings.api_token || !settings.warehouse_id) throw new Error('Dotykačka settings incomplete')
+  if (!settings.apiToken || !settings.warehouseId) throw new Error('Dotykačka settings incomplete')
 
-  const url = `https://api.dotykacka.pl/v2/warehouses/${encodeURIComponent(settings.warehouse_id)}/stocks`
+  const url = `https://api.dotykacka.pl/v2/warehouses/${encodeURIComponent(settings.warehouseId)}/stocks`
   const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${settings.api_token}` },
+    headers: { Authorization: `Bearer ${settings.apiToken}` },
   })
   if (!res.ok) throw new Error('Dotykačka request failed')
   const data = await res.json()

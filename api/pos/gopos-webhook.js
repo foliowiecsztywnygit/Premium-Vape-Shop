@@ -11,7 +11,7 @@ export default async function handler(req, res) {
 
   try {
     const settings = await getPosSettings({ storeId, provider: 'gopos' })
-    if (!settings.webhook_secret) return sendJson(res, 500, { error: 'POS settings not configured' })
+    if (!settings.webhookSecret) return sendJson(res, 500, { error: 'POS settings not configured' })
 
     const signatureHeader = req.headers['x-gopos-signature']
     if (typeof signatureHeader !== 'string' || !signatureHeader.trim()) {
@@ -19,7 +19,7 @@ export default async function handler(req, res) {
     }
 
     const raw = await readRawBody(req)
-    const expected = crypto.createHmac('sha256', settings.webhook_secret).update(raw).digest('hex')
+    const expected = crypto.createHmac('sha256', settings.webhookSecret).update(raw).digest('hex')
     const provided = signatureHeader.replace(/^sha256=/i, '').trim()
     if (!timingSafeEqualHex(provided, expected)) return sendJson(res, 401, { error: 'Unauthorized' })
 
@@ -43,4 +43,3 @@ export default async function handler(req, res) {
     return sendJson(res, 500, { error: 'Server error' })
   }
 }
-

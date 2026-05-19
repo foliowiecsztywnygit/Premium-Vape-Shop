@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { getSupabaseBrowser } from '../../supabase/client'
+import { apiFetch } from '../../api/client'
 
 function formatPrice(value, currency = 'PLN') {
   const safe = Number(value)
@@ -35,13 +35,12 @@ export default function BookingsFeed() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const supabase = useMemo(() => getSupabaseBrowser(), [])
-
   useEffect(() => {
     let mounted = true
-    if (!supabase) {
+    const token = localStorage.getItem('pvs-admin-token')
+    if (!token) {
       setLoading(false)
-      setError('Brak konfiguracji Supabase w .env (VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY)')
+      setError('Brak tokenu admina. Zaloguj się w panelu.')
       return () => {
         mounted = false
       }
@@ -50,15 +49,14 @@ export default function BookingsFeed() {
     setLoading(true)
     setError('')
 
-    supabase
-      .from('bookings')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(100)
-      .then(({ data, error }) => {
+    apiFetch('/api/admin/bookings', {
+      headers: {
+        'x-admin-token': token,
+      },
+    })
+      .then((data) => {
         if (!mounted) return
-        if (error) throw new Error(error.message)
-        setBookings(Array.isArray(data) ? data : [])
+        setBookings(Array.isArray(data?.bookings) ? data.bookings : [])
         setLoading(false)
       })
       .catch((err) => {
@@ -67,48 +65,47 @@ export default function BookingsFeed() {
         setLoading(false)
       })
 
-    const channel = supabase
-      .channel('bookings-feed')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'bookings' },
-        (payload) => {
-          setBookings((prev) => {
-            const next = Array.isArray(prev) ? [...prev] : []
-            const id = payload?.new?.id || payload?.old?.id
-            if (!id) return next
+    const es = new EventSource(`/api/admin/bookings/stream?token=${encodeURIComponent(token)}`)
 
-            if (payload.eventType === 'INSERT') {
-              return [payload.new, ...next.filter((x) => x.id !== id)]
-            }
+    es.addEventListener('upsert', (ev) => {
+      try {
+        const nextBooking = JSON.parse(ev.data || '{}')
+        if (!nextBooking?.id) return
+        setBookings((prev) => {
+          const next = Array.isArray(prev) ? [...prev] : []
+          const idx = next.findIndex((x) => x.id === nextBooking.id)
+          if (idx === -1) return [nextBooking, ...next]
+          next[idx] = nextBooking
+          return next
+        })
+      } catch {}
+    })
 
-            if (payload.eventType === 'UPDATE') {
-              const idx = next.findIndex((x) => x.id === id)
-              if (idx === -1) return [payload.new, ...next]
-              next[idx] = payload.new
-              return next
-            }
-
-            if (payload.eventType === 'DELETE') {
-              return next.filter((x) => x.id !== id)
-            }
-
-            return next
-          })
-        }
-      )
-      .subscribe()
+    es.addEventListener('error', () => {
+      setError((prev) => prev || 'Utracono połączenie realtime. Odśwież stronę.')
+    })
 
     return () => {
       mounted = false
-      supabase.removeChannel(channel)
+      es.close()
     }
-  }, [supabase])
+  }, [])
 
-  const updateStatus = async (bookingId, booking_status) => {
-    if (!supabase) return
-    const { error } = await supabase.from('bookings').update({ booking_status }).eq('id', bookingId)
-    if (error) setError(error.message)
+  const updateStatus = async (bookingId, bookingStatus) => {
+    const token = localStorage.getItem('pvs-admin-token')
+    if (!token) return
+    try {
+      await apiFetch(`/api/admin/bookings/${encodeURIComponent(bookingId)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': token,
+        },
+        body: JSON.stringify({ bookingStatus }),
+      })
+    } catch (e) {
+      setError(e?.message || 'Nie udało się zapisać statusu')
+    }
   }
 
   return (
@@ -132,9 +129,9 @@ export default function BookingsFeed() {
               <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
                 <div className="min-w-0">
                   <div className="text-[11px] tracking-[0.22em] uppercase text-black/50">
-                    {formatDate(b.created_at)} • Odbiór: {formatDate(b.pickup_time)}
+                    {formatDate(b.createdAt)} • Odbiór: {formatDate(b.pickupTime)}
                   </div>
-                  <div className="mt-2 font-black text-lg truncate">{b.customer_name}</div>
+                  <div className="mt-2 font-black text-lg truncate">{b.customerName}</div>
                   <div className="mt-1 text-sm text-black/70">{b.phone}</div>
                   {b.notes && <div className="mt-3 text-sm text-black/70">{b.notes}</div>}
                 </div>
@@ -142,10 +139,10 @@ export default function BookingsFeed() {
                 <div className="flex flex-col items-start md:items-end gap-3">
                   <div className="text-2xl font-black">{formatPrice(total, b.currency || 'PLN')}</div>
                   <div className="text-xs tracking-[0.18em] uppercase text-black/60">
-                    Płatność: {b.payment_status || 'pay_at_counter'}
+                    Płatność: {b.paymentStatus || 'pay_at_counter'}
                   </div>
                   <select
-                    value={b.booking_status || 'confirmed'}
+                    value={b.bookingStatus || 'confirmed'}
                     onChange={(e) => updateStatus(b.id, e.target.value)}
                     className="h-10 px-4 rounded-2xl border border-black/10 bg-white focus:outline-none focus:border-accent-cyan text-[12px] tracking-[0.14em] uppercase font-semibold"
                   >
@@ -185,4 +182,3 @@ export default function BookingsFeed() {
     </div>
   )
 }
-

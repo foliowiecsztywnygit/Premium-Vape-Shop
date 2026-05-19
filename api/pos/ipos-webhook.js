@@ -10,9 +10,9 @@ export default async function handler(req, res) {
 
   try {
     const settings = await getPosSettings({ storeId, provider: 'ipos' })
-    if (settings.webhook_secret) {
+    if (settings.webhookSecret) {
       const secret = req.headers['x-ipos-secret'] || req.headers['x-webhook-secret']
-      if (typeof secret !== 'string' || secret !== settings.webhook_secret) {
+      if (typeof secret !== 'string' || secret !== settings.webhookSecret) {
         return sendJson(res, 401, { error: 'Unauthorized' })
       }
     }
@@ -36,4 +36,3 @@ export default async function handler(req, res) {
     return sendJson(res, 500, { error: 'Server error' })
   }
 }
-

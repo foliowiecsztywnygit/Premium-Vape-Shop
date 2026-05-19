@@ -1,21 +1,24 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { PrismaClient } from '@prisma/client';
 import crypto from 'crypto';
-import { getSupabaseAdmin } from '../api/_supabaseAdmin.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import iposWebhook from '../api/pos/ipos-webhook.js';
+import goposWebhook from '../api/pos/gopos-webhook.js';
+import subiektBridge from '../api/pos/subiekt-bridge.js';
+import dotykackaPoll from '../api/pos/dotykacka-poll.js';
+import { getPrisma } from './prisma.js';
 
 dotenv.config();
 
 const app = express();
 app.set('trust proxy', true);
 if (!process.env.DATABASE_URL) {
-  process.env.DATABASE_URL = 'file:./dev.db';
+  throw new Error('DATABASE_URL is required (Postgres).');
 }
-const prisma = new PrismaClient();
+const prisma = getPrisma();
 
 const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'qwerty';
 const ADMIN_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -71,13 +74,61 @@ const ensureAdminConfig = async () => {
 await ensureAdminConfig();
 
 // Normal JSON parsing for other routes
-app.use(express.json());
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(cors());
 
 // --- ROUTES ---
 
+app.all('/api/pos/ipos-webhook', (req, res) => iposWebhook(req, res));
+app.all('/api/pos/gopos-webhook', (req, res) => goposWebhook(req, res));
+app.all('/api/pos/subiekt-bridge', (req, res) => subiektBridge(req, res));
+app.all('/api/pos/dotykacka-poll', (req, res) => dotykackaPoll(req, res));
+
 const requireAdmin = (req, res, next) => {
   const token = req.headers['x-admin-token'];
+const bookingStreams = new Set();
+
+function sseSend(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function broadcastBooking(event, payload) {
+  for (const res of bookingStreams) {
+    try {
+      sseSend(res, event, payload);
+    } catch {}
+  }
+}
+
+  if (typeof token !== 'string' || !token.trim()) return res.status(401).json({ error: 'Unauthorized' });
+  prisma.adminSession
+    .findUnique({ where: { token: token.trim() } })
+    .then((session) => {
+    .findUnique({ where: { token: token.trim() } })
+    .then((session) => {
+      if (!session) return res.status(401).json({ error: 'Unauthorized' });
+      if (session.expiresAt.getTime() <= Date.now()) {
+        return prisma.adminSession
+          .delete({ where: { token: session.token } })
+          .then(() => res.status(401).json({ error: 'Unauthorized' }))
+          .catch(() => res.status(401).json({ error: 'Unauthorized' }));
+      }
+      next();
+    })
+    .catch(() => res.status(401).json({ error: 'Unauthorized' }));
+};
+
+const requireAdminStream = (req, res, next) => {
+  const tokenFromHeader = req.headers['x-admin-token'];
+  const tokenFromQuery = req.query?.token;
+  const token = typeof tokenFromHeader === 'string' && tokenFromHeader.trim() ? tokenFromHeader.trim() : tokenFromQuery;
   if (typeof token !== 'string' || !token.trim()) return res.status(401).json({ error: 'Unauthorized' });
   prisma.adminSession
     .findUnique({ where: { token: token.trim() } })
@@ -185,6 +236,20 @@ app.get('/api/catalog/products/:id', async (req, res) => {
   }
 });
 
+app.get('/api/bookings/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const booking = await prisma.booking.findUnique({
+      where: { id },
+      include: { items: true },
+    });
+    if (!booking) return res.status(404).json({ error: 'Not found' });
+    res.json({ booking });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 app.post('/api/bookings/create', async (req, res) => {
   const ip = getClientIp(req);
   if (!ip) return res.status(400).json({ error: 'Missing IP' });
@@ -204,25 +269,46 @@ app.post('/api/bookings/create', async (req, res) => {
 
   let booking;
   try {
-    const supabase = getSupabaseAdmin();
-    const payload = {
-      customer_name: String(customerName).trim(),
-      phone: String(phone).trim(),
-      notes: notes ? String(notes).trim() : null,
-      pickup_time: String(pickupTime).trim(),
-      items,
-      currency: currency ? String(currency) : 'PLN',
-      subtotal: Number(subtotal) || 0,
-      total: Number(total) || Number(subtotal) || 0,
-      payment_status: 'pay_at_counter',
-      booking_status: 'confirmed',
-    };
+    const pickup = new Date(String(pickupTime).trim());
+    if (!Number.isFinite(pickup.getTime())) return res.status(400).json({ error: 'Invalid pickupTime' });
 
-    const result = await supabase.from('bookings').insert(payload).select('*').single();
-    if (result.error) return res.status(500).json({ error: result.error.message });
-    booking = result.data;
+    const normalizedItems = Array.isArray(items)
+      ? items
+          .map((x) => (x && typeof x === 'object' ? x : null))
+          .filter(Boolean)
+          .map((x) => ({
+            productId: String(x.productId),
+            variantId: x.variantId ? String(x.variantId) : null,
+            productName: String(x.productName || ''),
+            variantName: x.variantName ? String(x.variantName) : null,
+            image: x.image ? String(x.image) : null,
+            unitPrice: Number(x.unitPrice) || 0,
+            quantity: Math.max(1, Math.trunc(Number(x.quantity) || 1)),
+          }))
+          .filter((x) => x.productId && x.productName)
+      : [];
+
+    if (normalizedItems.length === 0) return res.status(400).json({ error: 'items is required' });
+
+    booking = await prisma.booking.create({
+      data: {
+        customerName: String(customerName).trim(),
+        phone: String(phone).trim(),
+        notes: notes ? String(notes).trim() : null,
+        pickupTime: pickup,
+        currency: currency ? String(currency) : 'PLN',
+        subtotal: Number(subtotal) || 0,
+        total: Number(total) || Number(subtotal) || 0,
+        paymentStatus: 'pay_at_counter',
+        bookingStatus: 'confirmed',
+        items: {
+          create: normalizedItems,
+        },
+      },
+      include: { items: true },
+    });
   } catch (error) {
-    return res.status(500).json({ error: 'Supabase env not configured' });
+    return res.status(500).json({ error: 'Server error' });
   }
 
   await prisma.bookingIpLimit
@@ -234,6 +320,149 @@ app.post('/api/bookings/create', async (req, res) => {
     .catch(() => {});
 
   res.json({ booking });
+  broadcastBooking('upsert', booking);
+});
+
+app.get('/api/admin/bookings', requireAdmin, async (req, res) => {
+  try {
+    const bookings = await prisma.booking.findMany({
+      include: { items: true },
+      orderBy: [{ createdAt: 'desc' }],
+      take: 100,
+    });
+    res.json({ bookings });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/admin/bookings/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { bookingStatus } = req.body || {};
+  if (bookingStatus != null && !String(bookingStatus).trim()) return res.status(400).json({ error: 'Invalid bookingStatus' });
+  try {
+    const booking = await prisma.booking.update({
+      where: { id },
+      data: {
+        ...(bookingStatus != null ? { bookingStatus: String(bookingStatus).trim() } : {}),
+      },
+      include: { items: true },
+    });
+    res.json({ booking });
+    broadcastBooking('upsert', booking);
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/admin/bookings/stream', requireAdminStream, async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  res.write('event: ready\ndata: {}\n\n');
+
+  bookingStreams.add(res);
+  req.on('close', () => {
+    bookingStreams.delete(res);
+  });
+});
+
+app.get('/api/admin/inventory', requireAdmin, async (req, res) => {
+  try {
+    const products = await prisma.product.findMany({
+      orderBy: [{ name: 'asc' }],
+      take: 200,
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        ean: true,
+        externalPosId: true,
+        stockQuantity: true,
+        isAvailable: true,
+      },
+    });
+    res.json({ products });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/admin/inventory/:id', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { stockQuantity, isAvailable } = req.body || {};
+  try {
+    const patch = {
+      ...(stockQuantity != null && Number.isFinite(Number(stockQuantity))
+        ? { stockQuantity: Math.max(0, Math.trunc(Number(stockQuantity))) }
+        : {}),
+      ...(typeof isAvailable === 'boolean' ? { isAvailable } : {}),
+    };
+    const product = await prisma.product.update({
+      where: { id },
+      data: patch,
+      select: {
+        id: true,
+        name: true,
+        sku: true,
+        ean: true,
+        externalPosId: true,
+        stockQuantity: true,
+        isAvailable: true,
+      },
+    });
+    res.json({ product });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.get('/api/admin/pos-settings', requireAdmin, async (req, res) => {
+  const storeId = typeof req.query?.storeId === 'string' && req.query.storeId.trim() ? req.query.storeId.trim() : 'default';
+  try {
+    const settings = await prisma.posSetting.findMany({
+      where: { storeId },
+      orderBy: [{ posProvider: 'asc' }],
+    });
+    res.json({ storeId, settings });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+app.put('/api/admin/pos-settings', requireAdmin, async (req, res) => {
+  const { storeId, posProvider, apiToken, warehouseId, webhookSecret } = req.body || {};
+  if (!storeId || !String(storeId).trim()) return res.status(400).json({ error: 'storeId is required' });
+  if (!posProvider || !String(posProvider).trim()) return res.status(400).json({ error: 'posProvider is required' });
+  try {
+    const setting = await prisma.posSetting.upsert({
+      where: {
+        storeId_posProvider: {
+          storeId: String(storeId).trim(),
+          posProvider: String(posProvider).trim(),
+        },
+      },
+      create: {
+        storeId: String(storeId).trim(),
+        posProvider: String(posProvider).trim(),
+        apiToken: apiToken != null && String(apiToken).trim() ? String(apiToken) : null,
+        warehouseId: warehouseId != null && String(warehouseId).trim() ? String(warehouseId) : null,
+        webhookSecret: webhookSecret != null && String(webhookSecret).trim() ? String(webhookSecret) : null,
+        lastSyncAt: null,
+      },
+      update: {
+        apiToken: apiToken !== undefined ? (apiToken != null && String(apiToken).trim() ? String(apiToken) : null) : undefined,
+        warehouseId:
+          warehouseId !== undefined ? (warehouseId != null && String(warehouseId).trim() ? String(warehouseId) : null) : undefined,
+        webhookSecret:
+          webhookSecret !== undefined ? (webhookSecret != null && String(webhookSecret).trim() ? String(webhookSecret) : null) : undefined,
+      },
+    });
+    res.json({ setting });
+  } catch {
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 app.get('/api/admin/categories', requireAdmin, async (req, res) => {
@@ -317,7 +546,8 @@ app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/products', requireAdmin, async (req, res) => {
-  const { slug, name, description, basePrice, currency, active, sortOrder, categoryId, images, variants } = req.body || {};
+  const { slug, name, description, basePrice, currency, active, sortOrder, categoryId, images, variants, sku, ean, externalPosId } =
+    req.body || {};
   if (!slug || !name) return res.status(400).json({ error: 'slug and name are required' });
   if (!Number.isFinite(Number(basePrice))) return res.status(400).json({ error: 'basePrice is required' });
   try {
@@ -331,6 +561,9 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
         active: typeof active === 'boolean' ? active : true,
         sortOrder: Number.isFinite(Number(sortOrder)) ? Number(sortOrder) : 0,
         categoryId: categoryId || null,
+        sku: sku != null && String(sku).trim() ? String(sku).trim() : null,
+        ean: ean != null && String(ean).trim() ? String(ean).trim() : null,
+        externalPosId: externalPosId != null && String(externalPosId).trim() ? String(externalPosId).trim() : null,
         images: {
           create: Array.isArray(images)
             ? images
@@ -370,7 +603,7 @@ app.post('/api/admin/products', requireAdmin, async (req, res) => {
 
 app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
   const { id } = req.params;
-  const { name, description, basePrice, currency, active, sortOrder, categoryId } = req.body || {};
+  const { name, description, basePrice, currency, active, sortOrder, categoryId, sku, ean, externalPosId } = req.body || {};
   try {
     const product = await prisma.product.update({
       where: { id },
@@ -382,6 +615,11 @@ app.put('/api/admin/products/:id', requireAdmin, async (req, res) => {
         ...(typeof active === 'boolean' ? { active } : {}),
         ...(sortOrder != null && Number.isFinite(Number(sortOrder)) ? { sortOrder: Number(sortOrder) } : {}),
         ...(categoryId !== undefined ? { categoryId: categoryId || null } : {}),
+        ...(sku !== undefined ? { sku: sku != null && String(sku).trim() ? String(sku).trim() : null } : {}),
+        ...(ean !== undefined ? { ean: ean != null && String(ean).trim() ? String(ean).trim() : null } : {}),
+        ...(externalPosId !== undefined
+          ? { externalPosId: externalPosId != null && String(externalPosId).trim() ? String(externalPosId).trim() : null }
+          : {}),
       },
       include: {
         images: { orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }] },

@@ -1,6 +1,8 @@
 import crypto from 'crypto'
 
 export async function readRawBody(req) {
+  if (Buffer.isBuffer(req.body)) return req.body
+  if (req.rawBody && Buffer.isBuffer(req.rawBody)) return req.rawBody
   const chunks = []
   for await (const chunk of req) chunks.push(chunk)
   return Buffer.concat(chunks)
@@ -37,4 +39,3 @@ export function timingSafeEqualHex(aHex, bHex) {
     return false
   }
 }
-

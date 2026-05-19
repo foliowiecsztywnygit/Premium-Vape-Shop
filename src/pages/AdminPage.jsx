@@ -12,6 +12,7 @@ import {
   adminUpdateProduct,
 } from '../api/admin'
 import ManualInventory from '../components/admin/ManualInventory'
+import PosSettings from '../components/admin/PosSettings'
 
 function slugify(input) {
   return String(input || '')
@@ -43,6 +44,9 @@ export default function AdminPage() {
   const [newProductDescription, setNewProductDescription] = useState('')
   const [newProductImageUrl, setNewProductImageUrl] = useState('')
   const [newProductVariants, setNewProductVariants] = useState('')
+  const [newProductSku, setNewProductSku] = useState('')
+  const [newProductEan, setNewProductEan] = useState('')
+  const [newProductExternalPosId, setNewProductExternalPosId] = useState('')
 
   const refresh = () => {
     setLoading(true)
@@ -199,6 +203,9 @@ export default function AdminPage() {
         currency: 'PLN',
         categoryId: newProductCategoryId || null,
         description: newProductDescription || null,
+        sku: newProductSku.trim() || null,
+        ean: newProductEan.trim() || null,
+        externalPosId: newProductExternalPosId.trim() || null,
         images,
         variants,
       })
@@ -209,6 +216,9 @@ export default function AdminPage() {
       setNewProductDescription('')
       setNewProductImageUrl('')
       setNewProductVariants('')
+      setNewProductSku('')
+      setNewProductEan('')
+      setNewProductExternalPosId('')
       refresh()
     } catch (err) {
       setError(err?.message || 'Błąd tworzenia produktu')
@@ -429,6 +439,26 @@ export default function AdminPage() {
                 placeholder="Slug (np. longfill-monkey-splash)"
                 className="h-11 px-4 rounded-2xl border border-black/10 focus:outline-none focus:border-accent-cyan"
               />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <input
+                  value={newProductSku}
+                  onChange={(e) => setNewProductSku(e.target.value)}
+                  placeholder="SKU (opcjonalnie)"
+                  className="h-11 px-4 rounded-2xl border border-black/10 focus:outline-none focus:border-accent-cyan"
+                />
+                <input
+                  value={newProductEan}
+                  onChange={(e) => setNewProductEan(e.target.value)}
+                  placeholder="EAN (opcjonalnie)"
+                  className="h-11 px-4 rounded-2xl border border-black/10 focus:outline-none focus:border-accent-cyan"
+                />
+                <input
+                  value={newProductExternalPosId}
+                  onChange={(e) => setNewProductExternalPosId(e.target.value)}
+                  placeholder="POS ID (opcjonalnie)"
+                  className="h-11 px-4 rounded-2xl border border-black/10 focus:outline-none focus:border-accent-cyan"
+                />
+              </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <select
                   value={newProductCategoryId}
@@ -529,6 +559,7 @@ export default function AdminPage() {
         </div>
 
         <ManualInventory />
+        <PosSettings />
         </div>
         )}
       </div>

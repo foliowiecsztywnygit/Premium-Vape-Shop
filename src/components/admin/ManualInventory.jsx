@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { getSupabaseBrowser } from '../../supabase/client'
+import { apiFetch } from '../../api/client'
 
 function toInt(value) {
   const n = Number(String(value).replace(',', '.'))
@@ -7,41 +7,38 @@ function toInt(value) {
   return Math.max(0, Math.trunc(n))
 }
 
-export default function ManualInventory({ storeId }) {
-  const supabase = useMemo(() => getSupabaseBrowser(), [])
+export default function ManualInventory() {
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [query, setQuery] = useState('')
 
   const load = async () => {
-    if (!supabase) {
+    const token = localStorage.getItem('pvs-admin-token')
+    if (!token) {
       setItems([])
       setLoading(false)
+      setError('Brak tokenu admina. Zaloguj się w panelu.')
       return
     }
     setLoading(true)
     setError('')
     try {
-      let q = supabase
-        .from('products')
-        .select('id,name,sku,stock_quantity,is_available,external_pos_id,ean,store_id')
-        .order('name', { ascending: true })
-        .limit(200)
-      if (storeId) q = q.eq('store_id', storeId)
-      const { data, error } = await q
-      if (error) throw error
-      setItems(Array.isArray(data) ? data : [])
+      const data = await apiFetch('/api/admin/inventory', {
+        headers: { 'x-admin-token': token },
+      })
+      const list = Array.isArray(data?.products) ? data.products : []
+      setItems(list)
       setLoading(false)
     } catch (e) {
-      setError('Błąd ładowania produktów z Supabase')
+      setError('Błąd ładowania produktów')
       setLoading(false)
     }
   }
 
   useEffect(() => {
     load()
-  }, [storeId])
+  }, [])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -53,25 +50,23 @@ export default function ManualInventory({ storeId }) {
   }, [items, query])
 
   const update = async (id, patch) => {
-    if (!supabase) return
+    const token = localStorage.getItem('pvs-admin-token')
+    if (!token) return
     setError('')
-    const { error } = await supabase.from('products').update(patch).eq('id', id)
-    if (error) {
+    try {
+      const res = await apiFetch(`/api/admin/inventory/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': token,
+        },
+        body: JSON.stringify(patch),
+      })
+      const next = res?.product
+      if (next?.id) setItems((prev) => prev.map((x) => (x.id === id ? next : x)))
+    } catch {
       setError('Nie udało się zapisać zmian')
-      return
     }
-    setItems((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)))
-  }
-
-  if (!supabase) {
-    return (
-      <div className="rounded-2xl border border-black/10 bg-white p-6">
-        <h2 className="text-xl font-black tracking-tight">Manual Inventory (Supabase)</h2>
-        <div className="mt-3 text-sm text-black/70">
-          Skonfiguruj VITE_SUPABASE_URL i VITE_SUPABASE_ANON_KEY, aby włączyć ręczną edycję stanów.
-        </div>
-      </div>
-    )
   }
 
   return (
@@ -112,7 +107,7 @@ export default function ManualInventory({ storeId }) {
                 <div className="font-semibold truncate">{p.name || '(bez nazwy)'}</div>
                 <div className="text-xs tracking-[0.18em] uppercase text-black/50 break-words">
                   {p.sku ? `SKU: ${p.sku}` : ''} {p.ean ? ` • EAN: ${p.ean}` : ''}{' '}
-                  {p.external_pos_id ? ` • POS: ${p.external_pos_id}` : ''}
+                  {p.externalPosId ? ` • POS: ${p.externalPosId}` : ''}
                 </div>
               </div>
 
@@ -120,26 +115,26 @@ export default function ManualInventory({ storeId }) {
                 <label className="h-11 rounded-2xl border border-black/10 bg-white px-3 inline-flex items-center justify-between">
                   <span className="text-xs tracking-[0.18em] uppercase text-black/50">Qty</span>
                   <input
-                    defaultValue={p.stock_quantity ?? 0}
+                    defaultValue={p.stockQuantity ?? 0}
                     inputMode="numeric"
                     className="w-20 text-right font-semibold outline-none"
                     onBlur={(e) => {
-                      const stock_quantity = toInt(e.target.value)
-                      update(p.id, { stock_quantity, is_available: stock_quantity > 0 })
+                      const stockQuantity = toInt(e.target.value)
+                      update(p.id, { stockQuantity, isAvailable: stockQuantity > 0 })
                     }}
                   />
                 </label>
 
                 <button
                   type="button"
-                  onClick={() => update(p.id, { is_available: !p.is_available })}
+                  onClick={() => update(p.id, { isAvailable: !p.isAvailable })}
                   className={`h-11 w-full rounded-2xl text-[12px] tracking-[0.18em] uppercase font-semibold transition-colors ${
-                    p.is_available
+                    p.isAvailable
                       ? 'bg-black text-white hover:bg-ink'
                       : 'border border-black/10 text-black hover:border-accent-cyan/60 hover:text-accent-cyan'
                   }`}
                 >
-                  {p.is_available ? 'Available' : 'Out of stock'}
+                  {p.isAvailable ? 'Available' : 'Out of stock'}
                 </button>
               </div>
             </div>
@@ -155,4 +150,3 @@ export default function ManualInventory({ storeId }) {
     </div>
   )
 }
-

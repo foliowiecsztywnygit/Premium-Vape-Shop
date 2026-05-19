@@ -1,6 +1,6 @@
-import { getSupabaseAdmin } from '../_supabaseAdmin.js'
 import { sendJson, getStoreId } from './_utils.js'
 import { syncDotykackaStock } from './sync.js'
+import { getPrisma } from '../../server/prisma.js'
 
 export default async function handler(req, res) {
   if (req.method !== 'GET' && req.method !== 'POST') return sendJson(res, 405, { error: 'Method not allowed' })
@@ -13,16 +13,14 @@ export default async function handler(req, res) {
       return sendJson(res, 200, { ok: true, store_id: storeId, ...result })
     }
 
-    const supabase = getSupabaseAdmin()
-    const { data, error } = await supabase
-      .from('pos_settings')
-      .select('store_id')
-      .eq('pos_provider', 'dotykacka')
-      .limit(20)
+    const prisma = getPrisma()
+    const data = await prisma.posSetting.findMany({
+      where: { posProvider: 'dotykacka' },
+      select: { storeId: true },
+      take: 20,
+    })
 
-    if (error) return sendJson(res, 500, { error: 'Server error' })
-
-    const storeIds = Array.isArray(data) ? [...new Set(data.map((x) => x.store_id).filter(Boolean))] : []
+    const storeIds = Array.isArray(data) ? [...new Set(data.map((x) => x.storeId).filter(Boolean))] : []
     const results = []
     for (const id of storeIds) {
       try {
@@ -37,4 +35,3 @@ export default async function handler(req, res) {
     return sendJson(res, 500, { error: 'Server error' })
   }
 }
-

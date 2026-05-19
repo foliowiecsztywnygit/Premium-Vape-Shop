@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -94,6 +94,12 @@ model Product {
   active      Boolean         @default(true)
   sortOrder   Int             @default(0)
 
+  sku         String?
+  ean         String?
+  externalPosId String?
+  stockQuantity Int           @default(0)
+  isAvailable  Boolean        @default(true)
+
   categoryId  String?
   category    Category?       @relation(fields: [categoryId], references: [id])
 
@@ -156,4 +162,50 @@ model BookingIpLimit {
   ip        String   @id
   bookingId String?
   createdAt DateTime @default(now())
+}
+
+model Booking {
+  id            String        @id @default(uuid())
+  customerName  String
+  phone         String
+  notes         String?
+  pickupTime    DateTime
+  currency      String        @default("PLN")
+  subtotal      Float         @default(0)
+  total         Float         @default(0)
+  paymentStatus String        @default("pay_at_counter")
+  bookingStatus String        @default("confirmed")
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  items         BookingItem[]
+}
+
+model BookingItem {
+  id          String   @id @default(uuid())
+  bookingId   String
+  booking     Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  productId   String
+  variantId   String?
+  productName String
+  variantName String?
+  image       String?
+  unitPrice   Float
+  quantity    Int
+}
+
+model PosSetting {
+  id           String   @id @default(uuid())
+  storeId      String
+  posProvider  String
+  apiToken     String?
+  warehouseId  String?
+  webhookSecret String?
+  lastSyncAt   DateTime?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([storeId, posProvider])
 }
