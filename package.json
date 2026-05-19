@@ -5,9 +5,11 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "start": "node server/index.js",
     "dev": "concurrently \"vite\" \"nodemon server/index.js\"",
     "dev:frontend": "vite",
     "dev:backend": "nodemon server/index.js",
+    "postinstall": "prisma generate",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:studio": "prisma studio",

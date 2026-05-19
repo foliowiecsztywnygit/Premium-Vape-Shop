@@ -1,4 +1,10 @@
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000'
+const envUrl = import.meta.env.VITE_API_URL
+
+export const API_URL = envUrl
+  ? String(envUrl).replace(/\/$/, '')
+  : import.meta.env.DEV
+    ? 'http://localhost:3000'
+    : ''
 
 export async function apiFetch(path, options) {
   const res = await fetch(`${API_URL}${path}`, options)
@@ -10,4 +16,3 @@ export async function apiFetch(path, options) {
   }
   return data
 }
-
